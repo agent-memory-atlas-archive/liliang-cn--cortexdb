@@ -414,9 +414,9 @@ func TestUnderACallerScopeAMemoryWhoseBucketCannotBeReadIsHidden(t *testing.T) {
 	}
 }
 
-// The walk is widened more than once: twenty beta chunks met
-// before alpha's use up the pools of 8 and 16, and the pool of 32 reaches
-// alpha's a1.
+// Twenty beta chunks written before alpha's would use up the pools of 8
+// and 16 of a walk that met them; under alpha's scope the walk does not
+// meet them (walkNeighbors), and its first pool reaches alpha's a1.
 func TestUnderACallerScopeSearchChunksByEntitiesWidensItsWalkTwice(t *testing.T) {
 	db := scopedGraphBrain(t)
 	for i := range 20 {
@@ -437,41 +437,51 @@ func TestUnderACallerScopeSearchChunksByEntitiesWidensItsWalkTwice(t *testing.T)
 	}
 }
 
-// The walk stops widening at the first pool that fills top_k, so the
-// answer ranks the chunks that pool met, as Scope says. Fifteen beta chunks
-// and alpha's a0 fill Sable Ridge's pool of 16 (top_k 2); alpha's zz,
-// which mentions Sable Ridge and Tern Lock, is met through Tern Lock only.
-// a0 and zz fill top_k with one name each, ranked by id. A wider pool
-// would also meet zz through Sable Ridge and rank it first.
+// The walk stops widening at the first pool that fills top_k, and under a
+// caller scope the pool holds only what the caller is served. Fifteen beta
+// chunks and alpha's a0 fill Sable Ridge's pool of 16 (top_k 2); alpha's
+// zz, which mentions Sable Ridge and Tern Lock, is then met through Tern
+// Lock only. Without a scope that first pool fills top_k, and its ranking,
+// one name for each chunk and ties by id, is the answer: a wider pool would
+// also meet zz through Sable Ridge and rank it first. Under alpha's scope
+// the walk never meets beta's chunks, so they do not use up the pool: zz is
+// met through both names and ranks first, the answer alpha got before beta
+// wrote them.
 func TestUnderACallerScopeSearchChunksByEntitiesStopsAtThePoolThatFillsTopK(t *testing.T) {
 	db := scopedGraphBrain(t)
-	var docs []KnowledgeSaveRequest
+	var beta, alpha []KnowledgeSaveRequest
 	for i := range 15 {
 		id := fmt.Sprintf("0%02d", i)
-		docs = append(docs, KnowledgeSaveRequest{KnowledgeID: id, Collection: "beta", Content: "sable ridge beta note " + id + ".",
+		beta = append(beta, KnowledgeSaveRequest{KnowledgeID: id, Collection: "beta", Content: "sable ridge beta note " + id + ".",
 			Entities: []ToolEntityInput{{Name: "Sable Ridge", ChunkIDs: []string{graphChunkNodeID(id, 0)}}}})
 	}
-	docs = append(docs,
+	alpha = append(alpha,
 		KnowledgeSaveRequest{KnowledgeID: "a0", Collection: "alpha", Content: "sable ridge alpha note.",
 			Entities: []ToolEntityInput{{Name: "Sable Ridge", ChunkIDs: []string{graphChunkNodeID("a0", 0)}}}},
 		KnowledgeSaveRequest{KnowledgeID: "zz", Collection: "alpha", Content: "sable ridge feeds tern lock.",
 			Entities: []ToolEntityInput{{Name: "Sable Ridge", ChunkIDs: []string{graphChunkNodeID("zz", 0)}}, {Name: "Tern Lock", ChunkIDs: []string{graphChunkNodeID("zz", 0)}}}})
-	for _, doc := range docs {
+	for _, doc := range append(beta, alpha...) {
 		if _, err := db.SaveKnowledge(context.Background(), doc); err != nil {
 			t.Fatal(err)
 		}
 	}
 	req := ToolSearchChunksByEntitiesRequest{EntityNames: []string{"Sable Ridge", "Tern Lock"}, TopK: 2}
-	out, err := db.GraphRAGTools().SearchChunksByEntities(WithCallerScope(context.Background(), alphaScope()), req)
-	if err != nil {
-		t.Fatal(err)
+	ids := func(ctx context.Context) []string {
+		out, err := db.GraphRAGTools().SearchChunksByEntities(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, c := range out.Chunks {
+			got = append(got, c.ID)
+		}
+		return got
 	}
-	var got []string
-	for _, c := range out.Chunks {
-		got = append(got, c.ID)
+	if got, want := ids(context.Background()), []string{graphChunkNodeID("000", 0), graphChunkNodeID("001", 0)}; !slices.Equal(got, want) {
+		t.Fatalf("without a scope top_k 2 serves %v, want %v, the ranking of the first pool that fills top_k", got, want)
 	}
-	if want := []string{graphChunkNodeID("a0", 0), graphChunkNodeID("zz", 0)}; !slices.Equal(got, want) {
-		t.Fatalf("under alpha's scope top_k 2 serves %v, want %v, the ranking of the first pool that fills top_k", got, want)
+	if got, want := ids(WithCallerScope(context.Background(), alphaScope())), []string{graphChunkNodeID("zz", 0), graphChunkNodeID("a0", 0)}; !slices.Equal(got, want) {
+		t.Fatalf("under alpha's scope top_k 2 serves %v, want %v: beta's chunks must not use up alpha's pool", got, want)
 	}
 }
 
@@ -499,11 +509,12 @@ func TestSearchChunksByEntitiesStopsOnACancelledContext(t *testing.T) {
 	}
 }
 
-// At two hops the walk's pool can fill with entities met through a hidden
-// chunk before the caller's chunk is met: the walk counts every node it
-// meets, not only chunks, to know it was cut. Beta's b0 mentions Sable
-// Ridge and eight other entities; alpha's a9 lists Sable Ridge with no
-// mention, backs its relation to Tern Lock and mentions Tern Lock only.
+// At two hops a walk that passed through a hidden chunk would fill its pool
+// with the entities the chunk mentions before the caller's chunk is met.
+// Beta's b0 mentions Sable Ridge and eight other entities; alpha's a9 lists
+// Sable Ridge with no mention, backs its relation to Tern Lock and mentions
+// Tern Lock only. Under alpha's scope the walk does not enter b0, and
+// reaches a9 over alpha's relation.
 func TestUnderACallerScopeSearchChunksByEntitiesWidensPastEntitiesAtTwoHops(t *testing.T) {
 	db := scopedGraphBrain(t)
 	b0, a9 := graphChunkNodeID("b0", 0), graphChunkNodeID("a9", 0)
@@ -578,8 +589,9 @@ func TestSearchChunksByEntitiesRanksTheChunksMoreNamesReach(t *testing.T) {
 	}
 }
 
-// Eight beta chunks met first fill the walk's own pool of top_k*8, so the
-// walk is widened until the caller's chunk is met, or the walk ends.
+// Eight beta chunks met first fill the pool of top_k*8 of a walk with no
+// scope; under alpha's scope the walk does not meet them, and the caller's
+// chunk is the first it counts.
 func TestUnderACallerScopeSearchChunksByEntitiesWidensItsWalkPastHiddenChunks(t *testing.T) {
 	db := scopedGraphBrain(t)
 	for i := range 8 {

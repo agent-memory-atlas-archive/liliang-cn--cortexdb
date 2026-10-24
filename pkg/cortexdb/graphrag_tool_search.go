@@ -159,9 +159,12 @@ func (t *GraphRAGToolbox) searchTextCandidates(ctx context.Context, req ToolSear
 	return t.db.filterScoredEmbeddings(ctx, ordered, resolution.Plan.Filters), nil
 }
 
-// SearchChunksByEntities finds chunks that are linked to the requested entities.
+// SearchChunksByEntities finds chunks that are linked to the requested
+// entities. Under a caller scope the walk takes only what the caller is
+// served (walkNeighbors), so a chunk is counted only when the caller's own
+// part of the graph reaches it.
 func (t *GraphRAGToolbox) SearchChunksByEntities(ctx context.Context, req ToolSearchChunksByEntitiesRequest) (*ToolSearchChunksByEntitiesResponse, error) {
-	return t.searchChunksByEntities(ctx, req, t.db.graph.Neighbors)
+	return t.searchChunksByEntities(ctx, req, t.db.walkNeighbors)
 }
 
 // searchChunksByEntities is SearchChunksByEntities over the walk neighbors.
@@ -181,7 +184,10 @@ func (t *GraphRAGToolbox) searchChunksByEntities(ctx context.Context, req ToolSe
 	// hidden ones left out, before the cut to top_k, so a hidden chunk does
 	// not use up the caller's limit. When hidden chunks also used up the
 	// walk's pool, the walk is taken again with twice the pool, until top_k
-	// is filled or no walk was cut. Past maxChunkWalkPool the walk has no
+	// is filled or no walk was cut. Under a caller scope the walk never
+	// meets what the scope hides (walkNeighbors), and only an expired
+	// document's chunks, which a walk with no scope still meets, are left
+	// out here. Past maxChunkWalkPool the walk has no
 	// limit (pool 0), as a top_k*8 that overflows had on main, so the loop
 	// ends. A cancelled call ends it too: under a scope the seeds cannot
 	// be read, and without one every walk fails, and either is the answer.
@@ -277,6 +283,10 @@ func (t *GraphRAGToolbox) ExpandGraph(ctx context.Context, req ToolExpandGraphRe
 	if len(req.RelationPolicies) > 0 {
 		scores = map[string]float64{}
 	}
+	// Under a caller scope the walk takes only the nodes and edges the
+	// caller is served (walkAdmit): what it reaches, and the score of the
+	// best path to it, are those of the caller's part of the graph.
+	admit := t.db.walkAdmit(ctx)
 	for _, nodeID := range seeds {
 		if nodeID == "" {
 			continue
@@ -292,6 +302,7 @@ func (t *GraphRAGToolbox) ExpandGraph(ctx context.Context, req ToolExpandGraphRe
 			NodeTypes: nodeTypes,
 			Limit:     req.Limit,
 			Relations: req.RelationPolicies,
+			Admit:     admit,
 		}
 		if scores != nil {
 			scored, err := t.db.graph.ScoredNeighbors(ctx, nodeID, opts)
@@ -329,7 +340,8 @@ func (t *GraphRAGToolbox) ExpandGraph(ctx context.Context, req ToolExpandGraphRe
 // of a hidden document (expired, held by the review gate, or out of the
 // caller's scope), the memory nodes the review gate or the scope hides, the
 // entities the scope hides (scopedNode), the edges that touch them and their
-// scores; an entity the scope serves is a reduced copy: the graph is the one place a search
+// scores, and the edges the caller is not served (servedEdges); an entity
+// the scope serves is a reduced copy: the graph is the one place a search
 // could otherwise still reach a hidden passage, through the entities it
 // mentions.
 func (db *DB) withoutExpiredDocuments(ctx context.Context, nodes []*graph.GraphNode, edges []*graph.GraphEdge, scores map[string]float64) ([]*graph.GraphNode, []*graph.GraphEdge) {
@@ -363,7 +375,7 @@ func (db *DB) withoutExpiredDocuments(ctx context.Context, nodes []*graph.GraphN
 		keptNodes = append(keptNodes, served)
 	}
 	if len(dropped) == 0 {
-		return keptNodes, db.withoutExpiredProvenance(ctx, edges)
+		return keptNodes, db.servedEdges(ctx, edges)
 	}
 	keptEdges := make([]*graph.GraphEdge, 0, len(edges))
 	for _, edge := range edges {
@@ -375,7 +387,7 @@ func (db *DB) withoutExpiredDocuments(ctx context.Context, nodes []*graph.GraphN
 		}
 		keptEdges = append(keptEdges, edge)
 	}
-	return keptNodes, db.withoutExpiredProvenance(ctx, keptEdges)
+	return keptNodes, db.servedEdges(ctx, keptEdges)
 }
 
 // servedSeeds keeps, among the node ids a walk starts from, those the
@@ -463,11 +475,12 @@ func (db *DB) withoutExpiredProvenance(ctx context.Context, edges []*graph.Graph
 	// A chunk whose node cannot be read is shown under the expiry alone,
 	// which is advisory, and hidden under the review gate or a caller
 	// scope's knowledge rule, which fail closed, as hiddenAmong does.
+	scope, _ := callerScopeOf(ctx)
 	unreadable := false
 	if len(chunkIDs) > 0 {
 		chunks, err := db.graph.GetNodesBatch(ctx, chunkIDs)
 		if err != nil {
-			if scope, _ := callerScopeOf(ctx); !db.reviewGate && scope.Knowledge == nil {
+			if !db.reviewGate && scope.Knowledge == nil {
 				return edges
 			}
 			unreadable = true
@@ -478,13 +491,19 @@ func (db *DB) withoutExpiredProvenance(ctx context.Context, edges []*graph.Graph
 			docIDs = append(docIDs, doc)
 		}
 	}
+	// Under a knowledge rule a chunk that names no document of the
+	// caller's, a chunk no node holds or one with no document, backs
+	// nothing: nothing says which collection stated the edge, as nothing
+	// says it of an entity with no list (scopedNode). Without one it is
+	// shown as stored, as before.
+	unplaced := func(id string) bool { return scope.Knowledge != nil && docOf[id] == "" }
 	hidden := db.hiddenAmong(ctx, nil, docIDs)
-	if len(hidden) == 0 && !unreadable {
+	if len(hidden) == 0 && !unreadable && !slices.ContainsFunc(chunkIDs, unplaced) {
 		return edges
 	}
 	hiddenChunk := func(id string) bool {
 		_, gone := hidden[docOf[id]]
-		return gone || unreadable
+		return gone || unreadable || unplaced(id)
 	}
 	out := make([]*graph.GraphEdge, 0, len(edges))
 	for _, edge := range edges {

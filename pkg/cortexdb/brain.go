@@ -327,12 +327,15 @@ func (b *KnowledgeMemory) Neighbors(ctx context.Context, req KnowledgeMemoryNeig
 	if len(served) == 0 {
 		return resp, nil
 	}
+	// Under a caller scope the walk takes only the nodes and edges the
+	// caller is served (walkAdmit), so the limit counts those alone.
 	neighbors, err := b.db.Graph().Neighbors(ctx, nodeID, graph.TraversalOptions{
 		MaxDepth:  req.MaxDepth,
 		EdgeTypes: req.EdgeTypes,
 		NodeTypes: nodeTypes,
 		Direction: req.Direction,
 		Limit:     req.Limit,
+		Admit:     b.db.walkAdmit(ctx),
 	})
 	if err != nil {
 		return nil, err
@@ -370,14 +373,19 @@ func (b *KnowledgeMemory) ShortestPath(ctx context.Context, req KnowledgeMemoryS
 		}
 		return nil, fmt.Errorf("no path found from %s to %s", fromID, toID)
 	}
-	path, err := b.db.Graph().ShortestPath(ctx, fromID, toID)
+	// Under a caller scope the search takes only the nodes and edges the
+	// caller is served (walkAdmit): the path is the shortest of the
+	// caller's part of the graph, or none, whatever shorter one runs
+	// through what the scope hides.
+	path, err := b.db.Graph().ShortestPathAdmitting(ctx, fromID, toID, b.db.walkAdmit(ctx))
 	if err != nil {
 		return nil, err
 	}
 	// A path through a node of an expired document, or over an edge only
 	// expired documents back, is not returned: the answer is the one the
-	// graph gives when there is none. The walk itself runs on the stored
-	// graph, so a longer live path is not looked for until the sweep.
+	// graph gives when there is none. Without a caller scope the search
+	// runs on the stored graph, so a longer live path is not looked for
+	// until the sweep.
 	nodes, edges := b.db.withoutExpiredDocuments(ctx, path.Nodes, path.Edges, nil)
 	if len(nodes) != len(path.Nodes) || len(edges) != len(path.Edges) {
 		return nil, fmt.Errorf("no path found from %s to %s", fromID, toID)

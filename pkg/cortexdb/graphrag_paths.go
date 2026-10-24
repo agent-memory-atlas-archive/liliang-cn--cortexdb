@@ -134,6 +134,10 @@ func (t *GraphRAGToolbox) SearchPaths(ctx context.Context, req ToolSearchPathsRe
 		MaxPaths:           req.MaxPaths,
 		MaxExpansions:      req.MaxExpansions,
 		IncludeBookkeeping: req.IncludeBookkeeping,
+		// Under a caller scope the search takes only what the caller is
+		// served (walkAdmit), so the paths, the expansions and the
+		// truncation are those of the caller's part of the graph.
+		Admit: t.db.walkAdmit(ctx),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("search paths: %w", err)
