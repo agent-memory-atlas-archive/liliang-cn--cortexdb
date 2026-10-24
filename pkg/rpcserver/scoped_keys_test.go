@@ -529,3 +529,48 @@ func TestASessionIDCannotTakeAUserConfinedKeyIntoAnotherUsersSession(t *testing.
 		t.Fatalf("operator lost zeus's session: %v %v", err, resp.GetResults())
 	}
 }
+
+// The gRPC twin of the REST test: a tool call whose arguments name a field
+// twice is refused to a key whose policy reads them.
+func TestOverGRPCToolArgumentsThatNameAFieldTwiceAreRefused(t *testing.T) {
+	ks, err := authz.NewKeySet([]authz.Key{
+		{ID: "operator", Secret: "op", Clearance: authz.ReadWrite},
+		{ID: "notes", Secret: "n", Clearance: authz.ReadWrite, Scope: authz.Scope{Collection: "notes"}},
+		{ID: "hermes", Secret: "h", Clearance: authz.ReadWrite, Scope: authz.Scope{UserID: "hermes"}},
+		{ID: "reader", Secret: "r", Clearance: authz.ReadOnly},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := newPolicyConn(t, Options{Keys: ks})
+	tools := rpcv1.NewToolsServiceClient(conn)
+	call := func(secret, tool, args string) (string, error) {
+		resp, err := tools.CallTool(asKey(secret), &rpcv1.CallToolRequest{Name: tool, ArgsJson: args})
+		return resp.GetResultJson(), err
+	}
+	if _, err := call("op", "knowledge_save", `{"knowledge_id":"s1","collection":"secrets","content":"SECRETTEXT"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := call("op", "memory_save", `{"memory_id":"z1","user_id":"zeus","content":"ZEUSMEMORY"}`); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ secret, tool, args string }{
+		{"n", "knowledge_get", `{"knowledge_id":"s1","knowledge_id":null}`},
+		{"n", "knowledge_update", `{"knowledge_id":"s1","knowledge_id":null,"content":"TAKEN"}`},
+		{"n", "knowledge_delete", `{"knowledge_id":"s1","knowledge_id":null}`},
+		{"h", "memory_get", `{"memory_id":"z1","memory_id":null}`},
+		{"h", "memory_update", `{"memory_id":"z1","memory_id":null,"content":"TAKEN"}`},
+		{"h", "memory_delete", `{"memory_id":"z1","memory_id":null}`},
+		{"r", "knowledge_graph_query", `{"query":"SELECT ?s WHERE { ?s ?p ?o } LIMIT 1","QUERY":"INSERT DATA { <urn:x> <urn:p> \"pwned\" }"}`},
+	} {
+		if out, err := call(c.secret, c.tool, c.args); status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s %s: want InvalidArgument, got %v %.120s", c.tool, c.args, err, out)
+		}
+	}
+	if out, err := call("op", "knowledge_get", `{"knowledge_id":"s1"}`); err != nil || !strings.Contains(out, "SECRETTEXT") {
+		t.Fatalf("s1 changed: %v %.160s", err, out)
+	}
+	if out, err := call("op", "knowledge_graph_query", `{"query":"SELECT ?o WHERE { <urn:x> <urn:p> ?o }"}`); err != nil || strings.Contains(out, "pwned") {
+		t.Fatalf("a read-only key wrote a triple: %v %.160s", err, out)
+	}
+}

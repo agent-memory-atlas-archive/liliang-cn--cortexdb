@@ -451,3 +451,54 @@ func TestARowGuardFailureHasItsOwnStatus(t *testing.T) {
 		}
 	}
 }
+
+// A body that names a field twice reads one way to the policy (a map, the
+// last copy wins, exact spelling only) and another way to the handler (a
+// struct, a later null keeps the first value, any spelling fills it). For a
+// key the policy reads the body for, it is refused before either reads it.
+func TestOverRESTABodyThatNamesAFieldTwiceIsRefusedToAKeyThePolicyReads(t *testing.T) {
+	ks, err := authz.NewKeySet([]authz.Key{
+		{ID: "operator", Secret: "op", Clearance: authz.ReadWrite},
+		{ID: "notes", Secret: "n", Clearance: authz.ReadWrite, Scope: authz.Scope{Collection: "notes"}},
+		{ID: "hermes", Secret: "h", Clearance: authz.ReadWrite, Scope: authz.Scope{UserID: "hermes"}},
+		{ID: "reader", Secret: "r", Clearance: authz.ReadOnly},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newPolicyServer(t, Options{Keys: ks})
+	wantStatus(t, srv, http.MethodPost, "/v1/tools/knowledge_save", "op", `{"knowledge_id":"s1","collection":"secrets","content":"SECRETTEXT"}`, http.StatusOK)
+	wantStatus(t, srv, http.MethodPost, "/v1/tools/memory_save", "op", `{"memory_id":"z1","user_id":"zeus","content":"ZEUSMEMORY"}`, http.StatusOK)
+
+	for _, c := range []struct{ secret, path, body string }{
+		{"n", "/v1/tools/knowledge_get", `{"knowledge_id":"s1","knowledge_id":null}`},
+		{"n", "/v1/tools/knowledge_update", `{"knowledge_id":"s1","knowledge_id":null,"content":"TAKEN"}`},
+		{"n", "/v1/tools/knowledge_delete", `{"knowledge_id":"s1","knowledge_id":null}`},
+		{"h", "/v1/tools/memory_get", `{"memory_id":"z1","memory_id":null}`},
+		{"h", "/v1/tools/memory_update", `{"memory_id":"z1","memory_id":null,"content":"TAKEN"}`},
+		{"h", "/v1/tools/memory_delete", `{"memory_id":"z1","memory_id":null}`},
+		{"n", "/v1/knowledge", `{"knowledge_id":"s1","knowledge_id":null,"collection":"notes","content":"TAKEN"}`},
+		{"h", "/v1/memory", `{"memory_id":"z1","memory_id":null,"user_id":"hermes","scope":"user","content":"TAKEN"}`},
+		{"r", "/v1/tools/knowledge_graph_query", `{"query":"SELECT ?s WHERE { ?s ?p ?o } LIMIT 1","QUERY":"INSERT DATA { <urn:x> <urn:p> \"pwned\" }"}`},
+		{"r", "/v1/graph/sparql", `{"query":"SELECT ?s WHERE { ?s ?p ?o } LIMIT 1","Query":"INSERT DATA { <urn:x> <urn:p> \"pwned\" }"}`},
+	} {
+		wantStatus(t, srv, http.MethodPost, c.path, c.secret, c.body, http.StatusBadRequest)
+	}
+
+	// Nothing was read, moved or written.
+	code, body := do(t, srv, http.MethodPost, "/v1/tools/knowledge_get", "op", `{"knowledge_id":"s1"}`)
+	if code != http.StatusOK || !strings.Contains(string(body), "SECRETTEXT") || !strings.Contains(string(body), `"collection":"secrets"`) {
+		t.Fatalf("s1 changed (%d): %s", code, body)
+	}
+	code, body = do(t, srv, http.MethodPost, "/v1/tools/memory_get", "op", `{"memory_id":"z1"}`)
+	if code != http.StatusOK || !strings.Contains(string(body), "ZEUSMEMORY") {
+		t.Fatalf("z1 changed (%d): %s", code, body)
+	}
+	code, body = do(t, srv, http.MethodPost, "/v1/tools/knowledge_graph_query", "op", `{"query":"SELECT ?o WHERE { <urn:x> <urn:p> ?o }"}`)
+	if code != http.StatusOK || strings.Contains(string(body), "pwned") {
+		t.Fatalf("a read-only key wrote a triple (%d): %s", code, body)
+	}
+
+	// The operator's key is decided by name alone and keeps decoding as before.
+	wantStatus(t, srv, http.MethodPost, "/v1/tools/knowledge_get", "op", `{"knowledge_id":"s1","knowledge_id":null}`, http.StatusOK)
+}

@@ -100,6 +100,20 @@ func authorizeWith(db *cortexdb.DB) func(rr route, next http.HandlerFunc) http.H
 				next(w, r)
 				return
 			}
+			// Every policy step below that reads the body reads it into a map,
+			// and the handler decodes it into a struct. For a key those steps
+			// apply to, both must read one value per field, so a body that
+			// names a field twice is refused first (authz.CheckUnambiguous).
+			if key.ReadsBody() {
+				body, ok := bufferBody(w, r)
+				if !ok {
+					return
+				}
+				if err := authz.CheckUnambiguous(body); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
 			// A missing entry is the zero authz.Method, which is Unclassified, and
 			// AuthorizeOperation denies it by name. Nothing branches on ok: a route
 			// nobody classified is a route nobody thought about.

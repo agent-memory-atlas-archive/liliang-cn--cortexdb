@@ -13,6 +13,7 @@ import (
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/authz"
 	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
+	rpcv1 "github.com/liliang-cn/cortexdb/v2/pkg/rpc/v1"
 )
 
 // nestedScanDepth bounds the walk for nested copies of a scope field. Nothing
@@ -53,6 +54,15 @@ func authInterceptorFrom(src *authz.KeySource, db *cortexdb.DB) grpc.UnaryServer
 		// is logged under the key that asked, which is the line an operator
 		// reads when a scope is too narrow or a key is being probed.
 		tagCaller(ctx, key.ID)
+		// A tool call's arguments are JSON the policy below reads into a map
+		// and the tool decodes into a struct. For a key the policy reads the
+		// arguments for, both must read one value per field, so a call that
+		// names a field twice is refused here (authz.CheckUnambiguous).
+		if call, ok := req.(*rpcv1.CallToolRequest); ok && key.ReadsBody() {
+			if err := authz.CheckUnambiguous([]byte(call.GetArgsJson())); err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+		}
 		// AuthorizeCall rather than AuthorizeMethod: the interceptor can read
 		// the request, so it can tell the policy which tool a CallTool names
 		// and get the classification of that tool instead of the blanket one.
