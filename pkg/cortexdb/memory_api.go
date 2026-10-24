@@ -819,7 +819,9 @@ func (db *DB) searchMemoryLexical(ctx context.Context, bucketID, query string, k
 
 	// One scan of the bucket measures it for the rarity score and for the
 	// bigram path's BM25; the bigram path counts its own bigrams.
-	rq := newRarityQuery(query, append(append([]string{}, keywords...), alternateQueries...))
+	// The words the keyword OR query searched for are credited first (see
+	// lexicalORSynonyms), so the cap on synonyms does not leave one out.
+	rq := newRarityQuery(query, append(append(lexicalORSynonyms(query, keywords, variants.kept), keywords...), alternateQueries...))
 	rq.common = variants.commonBeside(keywords)
 	var stats memoryBucketStats
 	if cjkQuery || !rq.empty() {

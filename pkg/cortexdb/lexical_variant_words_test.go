@@ -1058,3 +1058,68 @@ func TestVariantMatchReadsAThousandRows(t *testing.T) {
 		t.Errorf("%+v, want der common", v)
 	}
 }
+
+// A search measures at most variantMaxMeasured alternate queries, each one
+// match query of up to variantMatchCap rows. The words of the ones past the
+// cap are undecided, and do not join the OR query.
+func TestVariantWordsMeasureAtMostFourAlternates(t *testing.T) {
+	// omega is in one of the four rows the rest of its variant reaches:
+	// measured, it would join the OR query.
+	rows := []string{"alpha beta gamma", "alpha beta", "beta gamma", "gamma alpha", "omega delta theta", "delta one", "delta two", "theta three"}
+	asked := 0
+	match := func(string) ([]string, error) { asked++; return rows, nil }
+	alternates := []string{"k8s", "alpha beta gamma", "alpha gamma beta", "beta alpha gamma", "gamma beta alpha", "omega delta theta"}
+	v := variantWordsOf(alternates, match)
+	if asked != variantMaxMeasured {
+		t.Errorf("measured %d alternates, want %d", asked, variantMaxMeasured)
+	}
+	if slices.Contains(v.kept, "omega") {
+		t.Errorf("kept %q holds omega, a word of the fifth alternate of three words or more", v.kept)
+	}
+	if v := variantWordsOf(alternates[5:], match); !slices.Contains(v.kept, "omega") {
+		t.Errorf("measured alone, kept %q, want omega: the test needs it to join", v.kept)
+	}
+}
+
+// The measure reads a word as the word index and the coverage floor do,
+// without its accents: "université" typed with them is the "universite" of
+// the rows, and decides as it does typed without.
+func TestVariantWordsCompareWithoutAccents(t *testing.T) {
+	rows := []string{"La universite de Paris.", "Universite et professeurs.", "Professeurs de Paris.", "Universite, Paris, professeurs.", "Paris en hiver."}
+	match := func(string) ([]string, error) { return rows, nil }
+	plain := variantWordsOf([]string{"universite paris professeurs"}, match)
+	accented := variantWordsOf([]string{"université paris professeurs"}, match)
+	if len(plain.kept) == 0 && len(plain.common) == 0 {
+		t.Fatalf("without accents: %+v, the test needs a decided word", plain)
+	}
+	fold := func(ws []string) []string {
+		out := make([]string, len(ws))
+		for i, w := range ws {
+			out[i] = foldAccents(w)
+		}
+		return out
+	}
+	if !slices.Equal(fold(accented.kept), plain.kept) || fmt.Sprint(accented.common) != fmt.Sprint(plain.common) {
+		t.Errorf("with accents: kept %q common %v; without: kept %q common %v", accented.kept, accented.common, plain.kept, plain.common)
+	}
+	// And rows that spell it with accents hold the word typed without.
+	var spelled []string
+	for _, r := range rows {
+		spelled = append(spelled, strings.ReplaceAll(strings.ReplaceAll(r, "universite", "université"), "Universite", "Université"))
+	}
+	fromSpelled := variantWordsOf([]string{"universite paris professeurs"}, func(string) ([]string, error) { return spelled, nil })
+	if !slices.Equal(fromSpelled.kept, plain.kept) || fmt.Sprint(fromSpelled.common) != fmt.Sprint(plain.common) {
+		t.Errorf("rows with accents: kept %q common %v; without: kept %q common %v", fromSpelled.kept, fromSpelled.common, plain.kept, plain.common)
+	}
+	// A common word typed with accents is common to the coverage floor too.
+	v := variantWords{common: map[string]bool{"universite": true}}
+	if c := v.commonBeside([]string{"Université"}); c["universite"] {
+		t.Errorf("common beside the keyword Université: %v, want none", c)
+	}
+	q := newRarityQuery("paris", []string{"université"})
+	q.common = v.common
+	s := newRarityScorer(q, map[string]int{"paris": 1, "université": 1}, 10)
+	if m := s.coverage("Paris, université."); m.words != 1 {
+		t.Errorf("a row with paris and the common université: %d words, want 1", m.words)
+	}
+}

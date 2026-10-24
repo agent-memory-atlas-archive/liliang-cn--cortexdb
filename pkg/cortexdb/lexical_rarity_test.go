@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -239,3 +240,50 @@ func TestRelevanceFloorsAreConfigurable(t *testing.T) {
 		t.Fatal("an out-of-range floor was accepted")
 	}
 }
+
+// The keyword OR query searches for at most rarityMaxWords words beside the
+// question's own, and the coverage floor credits each of them. A keyword
+// list that repeats the question's words used to leave its last keyword
+// uncredited: the synonyms were cut to 24 words before the question's were
+// taken out, so the row the OR query found through falcon held one word.
+func TestTheORQueryAndTheFloorCountTheSameKeywords(t *testing.T) {
+	keywords := []string{"kestrel", "route"}
+	for i := 0; i < rarityMaxWords-2; i++ {
+		keywords = append(keywords, fmt.Sprintf("filler%c%c", 'a'+i/26, 'a'+i%26))
+	}
+	keywords = append(keywords, "falcon")
+	question := "kestrel route"
+	extras := lexicalORSynonyms(question, keywords, nil)
+	if len(extras) != rarityMaxWords-1 || extras[len(extras)-1] != "falcon" {
+		t.Fatalf("OR synonyms %q, want the %d keywords that are not the question's", extras, rarityMaxWords-1)
+	}
+	many := append(append([]string{}, keywords...), "late1", "late2", "late3")
+	if got := lexicalORSynonyms(question, many, nil); len(got) != rarityMaxWords {
+		t.Errorf("OR synonyms of %d keywords: %d, want %d", len(many), len(got), rarityMaxWords)
+	}
+	queries := lexicalSearchQueries(question, many, nil, nil)
+	if or := queries[len(queries)-2]; strings.Count(or, " OR ")+1 != 2+rarityMaxWords {
+		t.Errorf("OR query %q: want the question's 2 words and %d more", or, rarityMaxWords)
+	}
+	q := newRarityQuery(question, keywords)
+	for _, w := range extras {
+		if !slices.Contains(q.extras, w) {
+			t.Errorf("the floor does not credit %q, which the OR query searches for", w)
+		}
+	}
+
+	eachLexicalBackend(t, func(t *testing.T, db *DB) {
+		saveGlobalMemories(t, db, map[string]string{
+			"answer": "A kestrel and a falcon shared the cliff all spring.",
+			"other":  "Notes on garden birds at the feeder.",
+		})
+		resp, err := db.SearchMemory(context.Background(), MemorySearchRequest{Query: question, Scope: "global", TopK: 5, Keywords: keywords})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if got := memoryIDs(resp.Results); !slices.Equal(got, []string{"answer"}) {
+			t.Errorf("results %v, want the row that holds kestrel and the keyword falcon", got)
+		}
+	})
+}
+

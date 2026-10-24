@@ -43,6 +43,10 @@ const (
 	// PostgreSQL, not by rank, so past the cap the shares are those of the
 	// first rows in that order, not of the best matches.
 	variantMatchCap = 1000
+	// variantMaxMeasured bounds the alternate queries measured for one
+	// search, each one match query of up to variantMatchCap rows. The words
+	// of the alternates past it are undecided, and do not join the OR query.
+	variantMaxMeasured = 4
 )
 
 // variantCommon reports whether a word that df of matched rows contain is
@@ -65,29 +69,46 @@ func (v variantWords) commonBeside(synonyms []string) map[string]bool {
 	if len(v.common) == 0 {
 		return nil
 	}
-	own := lexicalQueryKeywords(strings.Join(synonyms, " "))
+	own := map[string]bool{}
+	for _, w := range lexicalQueryKeywords(strings.Join(synonyms, " ")) {
+		own[foldAccents(w)] = true
+	}
 	common := make(map[string]bool, len(v.common))
 	for w := range v.common {
-		if !slices.Contains(own, w) {
+		if !own[w] {
 			common[w] = true
 		}
 	}
 	return common
 }
 
-// variantWordsOf sorts the words of each alternate query. match returns the
+// variantWordsOf sorts the words of each alternate query, of the first
+// variantMaxMeasured that have three words or more. match returns the
 // content of the rows a variant's OR query finds; the rows that the other
 // words of the variant reach are those among them that hold one of those
-// words. When a match fails, no variant word joins and the search runs as it
-// did before.
+// words. Words are compared without their accents, as the word index and the
+// coverage floor read them (see foldAccents), and v.common is keyed by the
+// folded word. When a match fails, no variant word joins and the search runs
+// as it did before.
 func variantWordsOf(alternateQueries []string, match func(orQuery string) ([]string, error)) variantWords {
 	v := variantWords{common: map[string]bool{}}
 	decided := map[string]bool{}
+	measured := 0
 	for _, alternate := range alternateQueries {
-		words := lexicalQueryKeywords(alternate)
+		// One word typed with two spellings of its accents is one word.
+		var words, folded []string
+		for _, w := range lexicalQueryKeywords(alternate) {
+			if key := foldAccents(w); !slices.Contains(folded, key) {
+				words, folded = append(words, w), append(folded, key)
+			}
+		}
 		if len(words) < 3 {
 			continue
 		}
+		if measured == variantMaxMeasured {
+			break
+		}
+		measured++
 		contents, err := match(strings.Join(formatFTSKeywords(words, false), " OR "))
 		if err != nil {
 			log.Printf("cortexdb: alternate-query words left out of the keyword query: %v", err)
@@ -96,16 +117,16 @@ func variantWordsOf(alternateQueries []string, match func(orQuery string) ([]str
 		held := make([][]bool, len(contents)) // held[r][i]: row r holds words[i]
 		count := make([]int, len(contents))   // how many of the words row r holds
 		for r, c := range contents {
-			lower := strings.ToLower(c)
+			lower := foldAccents(strings.ToLower(c))
 			held[r] = make([]bool, len(words))
-			for i, w := range words {
+			for i, w := range folded {
 				if containsWord(lower, w) {
 					held[r][i] = true
 					count[r]++
 				}
 			}
 		}
-		for i, w := range words {
+		for i, w := range folded {
 			matched, df := 0, 0
 			for r := range held {
 				if held[r][i] {
@@ -127,7 +148,7 @@ func variantWordsOf(alternateQueries []string, match func(orQuery string) ([]str
 		}
 	}
 	for _, w := range alternateQueryWords(alternateQueries) {
-		if decided[w] && !v.common[w] {
+		if key := foldAccents(w); decided[key] && !v.common[key] {
 			v.kept = append(v.kept, w)
 		}
 	}

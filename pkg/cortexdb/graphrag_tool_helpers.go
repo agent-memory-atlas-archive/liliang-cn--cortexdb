@@ -230,20 +230,43 @@ func lexicalSearchQueries(query string, keywords, alternateQueries, alternateWor
 		addQuery(sanitizeFTSQuery(alternateQuery))
 	}
 
-	plannedKeywords := lexicalQueryKeywords(strings.Join(keywords, " "))
 	autoKeywords := lexicalQueryKeywords(trimmed)
 	if len(autoKeywords) > 0 {
 		addQuery(strings.Join(autoKeywords, " OR "))
 	}
 	// Each alternate query above is an AND of all its words, which a sentence
 	// rarely meets in one row; its words also join the OR query, as keywords do.
-	allKeywords := mergeLexicalKeywords(plannedKeywords, autoKeywords, alternateWords)
+	allKeywords := mergeLexicalKeywords(autoKeywords, lexicalORSynonyms(trimmed, keywords, alternateWords))
 	if len(allKeywords) > 0 {
 		addQuery(strings.Join(formatFTSKeywords(allKeywords, false), " OR "))
 		addQuery(strings.Join(formatFTSKeywords(allKeywords, true), " OR "))
 	}
 
 	return queries
+}
+
+// lexicalORSynonyms are the words the keyword OR query searches for beside
+// the question's own: the keywords, then the alternate-query words that join
+// it (see variantWordsOf), each once and none of the question's, at most
+// rarityMaxWords of them. The coverage floor credits the same words (see
+// newRarityQuery), so a row the OR query finds through one of them is not
+// then scored as holding none.
+func lexicalORSynonyms(query string, keywords, alternateWords []string) []string {
+	own := make(map[string]struct{})
+	for _, w := range lexicalQueryKeywords(query) {
+		own[w] = struct{}{}
+	}
+	var out []string
+	for _, w := range mergeLexicalKeywords(lexicalQueryKeywords(strings.Join(keywords, " ")), alternateWords) {
+		if _, ok := own[w]; ok {
+			continue
+		}
+		if len(out) == rarityMaxWords {
+			break
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 // alternateQueryWords are the keywords of each alternate query, in order,

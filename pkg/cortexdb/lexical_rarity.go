@@ -73,8 +73,8 @@ type rarityQuery struct {
 	// not contain: lowercased words and CJK bigrams.
 	extras []string
 	// common are the words of the alternate queries that are common in their
-	// match sets (see variantWords). As extras they add their weight, but they
-	// are not separate words of a row.
+	// match sets (see variantWords), without their accents. As extras they
+	// add their weight, but they are not separate words of a row.
 	common map[string]bool
 }
 
@@ -98,20 +98,27 @@ func newRarityQuery(query string, synonyms []string) rarityQuery {
 	for _, t := range q.cjk.terms {
 		have[t] = struct{}{}
 	}
+	// The synonyms' words are capped after the question's own are taken out,
+	// as the keyword OR query caps them (see lexicalORSynonyms), so a word
+	// that query searches for is credited when a row holds it. Their CJK
+	// bigrams are bounded by cjkMaxTerms, apart from the words.
 	joined := strings.Join(synonyms, " ")
-	add := func(term string) {
+	add := func(term string, budget *int) {
 		key := foldAccents(term)
-		if _, ok := have[key]; ok || len(q.extras) >= rarityMaxWords {
+		if _, ok := have[key]; ok || *budget <= 0 {
 			return
 		}
 		have[key] = struct{}{}
 		q.extras = append(q.extras, term)
+		*budget--
 	}
-	for _, w := range rarityWords(joined, rarityMaxWords) {
-		add(w)
+	wordBudget := rarityMaxWords
+	for _, w := range rarityWords(joined, math.MaxInt) {
+		add(w, &wordBudget)
 	}
+	bigrams := cjkMaxTerms
 	for _, t := range cjkQueryTerms(joined).terms {
-		add(t)
+		add(t, &bigrams)
 	}
 	return q
 }
@@ -166,8 +173,8 @@ type rarityScorer struct {
 	wordW  []float64 // weight of q.words[i]
 	charW  []float64 // weight of each CJK content character of the question
 	extraW []float64 // weight of q.extras[i]
-	total  float64   // what the whole question weighs
-	words  int       // separate words in the question, counted as rarityMatch.words
+	total    float64 // what the whole question weighs
+	words    int     // separate words in the question, counted as rarityMatch.words
 }
 
 // rarityPriorRows are rows assumed to exist beside the searched set, holding
@@ -332,7 +339,7 @@ func (s *rarityScorer) coverage(content string) rarityMatch {
 		}
 		if hit {
 			got += s.extraW[i]
-			if !s.q.common[e] {
+			if !s.q.common[foldAccents(e)] {
 				m.words++
 			}
 		}

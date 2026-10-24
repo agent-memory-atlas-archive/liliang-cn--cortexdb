@@ -159,10 +159,14 @@ func (db *DB) newKnowledgeKeywordFloor(ctx context.Context, plan RetrievalPlan, 
 	}
 	return &knowledgeKeywordFloor{floor: db.knowledgeKeywordFloor, build: func() (*rarityScorer, error) {
 		synonyms := append(append(append([]string{}, plan.Keywords...), plan.AlternateQueries...), plan.EntityNames...)
-		q := newRarityQuery(plan.Query, synonyms)
+		var variants variantWords
 		if len(plan.AlternateQueries) > 0 {
-			q.common = db.chunkVariantWords(ctx, collection, plan.AlternateQueries).commonBeside(append(append([]string{}, plan.Keywords...), plan.EntityNames...))
+			variants = db.chunkVariantWords(ctx, collection, plan.AlternateQueries)
 		}
+		// The words the keyword OR query searches for are credited first, so
+		// the cap on synonyms does not leave out a word that found the row.
+		q := newRarityQuery(plan.Query, append(lexicalORSynonyms(plan.Query, plan.Keywords, variants.kept), synonyms...))
+		q.common = variants.commonBeside(append(append([]string{}, plan.Keywords...), plan.EntityNames...))
 		return db.chunkRarityScorer(ctx, collection, q)
 	}}
 }
