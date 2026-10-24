@@ -173,6 +173,10 @@ type rarityScorer struct {
 	wordW  []float64 // weight of q.words[i]
 	charW  []float64 // weight of each CJK content character of the question
 	extraW []float64 // weight of q.extras[i]
+	// inflects[i] are the question words q.extras[i] is a form of (see
+	// inflects): in a row that holds one of them, the extra is not another
+	// word of the row.
+	inflects [][]int
 	total    float64 // what the whole question weighs
 	words    int     // separate words in the question, counted as rarityMatch.words
 }
@@ -245,8 +249,15 @@ func newRarityScorer(q rarityQuery, df map[string]int, n int) *rarityScorer {
 			s.total += s.charW[pos]
 		}
 	}
-	for _, e := range q.extras {
+	for i, e := range q.extras {
 		s.extraW = append(s.extraW, rarityExtraWeight*rarityIDF(df[e], n))
+		var of []int
+		for j := range q.words {
+			if inflects(s.folded[j], s.folded[len(q.words)+i]) {
+				of = append(of, j)
+			}
+		}
+		s.inflects = append(s.inflects, of)
 	}
 	s.words = len(q.words)
 	for pos, start := range q.cjk.fragmentStart {
@@ -298,10 +309,12 @@ func (s *rarityScorer) coverage(content string) rarityMatch {
 	folded := foldAccents(lower)
 	var m rarityMatch
 	var got float64
+	held := make([]bool, len(s.q.words))
 	for i := range s.q.words {
 		if containsWord(folded, s.folded[i]) {
 			got += s.wordW[i]
 			m.words++
+			held[i] = true
 		}
 	}
 	if len(s.charW) > 0 {
@@ -339,7 +352,7 @@ func (s *rarityScorer) coverage(content string) rarityMatch {
 		}
 		if hit {
 			got += s.extraW[i]
-			if !s.q.common[foldAccents(e)] {
+			if !s.q.common[foldAccents(e)] && !heldInflection(held, s.inflects[i]) {
 				m.words++
 			}
 		}
@@ -462,6 +475,27 @@ var latinFolds = []struct {
 		"aaaa....................eeeeee.." + // U+1EA0
 		"........iiiioooo................" + // U+1EC0
 		"....uuuu..........yyyyyyyy"}, //       U+1EE0
+}
+
+// inflects reports whether two words are forms of one as containsWord
+// matches them: the longer starts with the shorter, of four letters or more
+// ("recommend", "recommendation"). A row that holds "recommendations" holds
+// both, and that is one word of the question, not two.
+func inflects(a, b string) bool {
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	return a != b && utf8.RuneCountInString(a) >= 4 && strings.HasPrefix(b, a)
+}
+
+// heldInflection reports whether a row holds one of the question words of.
+func heldInflection(held []bool, of []int) bool {
+	for _, j := range of {
+		if held[j] {
+			return true
+		}
+	}
+	return false
 }
 
 // isWordRune is a rune that continues a word for containsWord: a letter or

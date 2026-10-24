@@ -287,3 +287,36 @@ func TestTheORQueryAndTheFloorCountTheSameKeywords(t *testing.T) {
 	})
 }
 
+// "recommend" and "recommendation" are one word to containsWord, which
+// matches a word of four letters or more as the start of one: a row that
+// says "Recommendations" holds the question's word, and the keyword is not a
+// second word of it. With both counted, such rows passed the floor's "more
+// than one word" rule for a question about novels.
+func TestAKeywordThatIsAFormOfAQuestionWordIsNotASecondWord(t *testing.T) {
+	q := newRarityQuery("recommend a good science fiction novel", []string{"recommendation", "book"})
+	s := newRarityScorer(q, map[string]int{}, 100)
+	if m := s.coverage("Recommendations accepted: the engine stays built in."); m.words != 1 {
+		t.Errorf("a row that holds recommendations only: %d words, want 1", m.words)
+	}
+	if m := s.coverage("A recommendation for a book."); m.words != 2 {
+		t.Errorf("a row that holds recommendation and book: %d words, want 2", m.words)
+	}
+	// The keyword alone, in a row without the question's word, is a word.
+	q = newRarityQuery("recommendation for a novel", []string{"recommend"})
+	s = newRarityScorer(q, map[string]int{}, 100)
+	if m := s.coverage("We recommend this novel."); m.words != 2 {
+		t.Errorf("a row that holds recommend and novel: %d words, want 2", m.words)
+	}
+	eachLexicalBackend(t, func(t *testing.T, db *DB) {
+		saveGlobalMemories(t, db, map[string]string{
+			"decision": "Recommendations accepted: the engine stays built in, and schedules stay on the queen.",
+		})
+		resp, err := db.SearchMemory(context.Background(), MemorySearchRequest{Query: "recommend a good science fiction novel", Scope: "global", TopK: 5, Keywords: []string{"recommendation"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if got := memoryIDs(resp.Results); len(got) != 0 {
+			t.Errorf("results %v, want none", got)
+		}
+	})
+}
