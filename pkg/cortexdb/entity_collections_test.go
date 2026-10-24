@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/liliang-cn/cortexdb/v2/pkg/graph"
 )
 
 // Two collections on one server share the entity "Acme": each has a document
@@ -71,8 +73,8 @@ func TestASearchInOneCollectionDoesNotReachAnotherThroughASharedEntity(t *testin
 }
 
 // The entity rule on its own. An entity that only `secrets` ever saved gets a
-// mention edge from a `notes` chunk by hand, through upsert_entities, which
-// has no collection and so leaves the entity's list alone. The walk from the
+// mention edge from a `notes` chunk by hand, written to the graph directly,
+// which leaves the entity's list alone. The walk from the
 // notes chunk reaches that entity and must stop there: `notes` does not know
 // it, so nothing it mentions in `secrets` comes back.
 func TestTheWalkDoesNotPassThroughAnEntityTheCollectionDoesNotKnow(t *testing.T) {
@@ -96,10 +98,12 @@ func TestTheWalkDoesNotPassThroughAnEntityTheCollectionDoesNotKnow(t *testing.T)
 	}
 	// The notes chunk never names Globex, so extraction adds nothing. The
 	// hand-made mention has no collection, so Globex stays known to secrets only.
-	if _, err := db.GraphRAGTools().UpsertEntities(c, ToolUpsertEntitiesRequest{
-		Entities: []ToolEntityInput{{Name: "Globex", Type: "organization", ChunkIDs: []string{graphChunkNodeID("notes-1", 0)}}},
-	}); err != nil {
-		t.Fatalf("upsert_entities: %v", err)
+	// (upsert_entities would record notes: it adds the collections of the
+	// chunks it names.)
+	mention := &graph.GraphEdge{ID: "edge:mention:hand", FromNodeID: graphChunkNodeID("notes-1", 0),
+		ToNodeID: graphEntityNodeID("Globex"), EdgeType: "mentions", Weight: 1}
+	if result, err := db.graph.UpsertEdgesBatch(c, []*graph.GraphEdge{mention}); err != nil || result.Err() != nil {
+		t.Fatalf("hand-made mention: %v %v", err, result.Err())
 	}
 	node, err := db.graph.GetNode(c, graphEntityNodeID("Globex"))
 	if err != nil {

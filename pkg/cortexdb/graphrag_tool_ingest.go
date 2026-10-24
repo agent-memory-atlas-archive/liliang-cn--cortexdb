@@ -500,6 +500,11 @@ func (t *GraphRAGToolbox) UpsertEntities(ctx context.Context, req ToolUpsertEnti
 	if req.DocumentID != "" && len(nodes) > 0 {
 		mergeEntitySourceDocuments(nodes, prior, req.DocumentID)
 	}
+	chunkCollections, err := t.db.mentionChunkCollections(ctx, edges)
+	if err != nil {
+		return nil, err
+	}
+	mergeMentionCollections(nodes, prior, edges, chunkCollections)
 	if err := t.db.preserveDeclaredEntityTypes(ctx, nodes); err != nil {
 		return nil, err
 	}
