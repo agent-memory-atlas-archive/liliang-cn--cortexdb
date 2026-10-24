@@ -90,18 +90,26 @@ func (db *DB) expandGraphChunkNeighborhoods(ctx context.Context, chunkResults ma
 		}
 
 		nextScores := make(map[string]float64)
-		for _, frontierID := range frontierIDs {
-			baseScore := frontierScores[frontierID]
-			for _, edge := range edgeMap[frontierID] {
-				neighborID := edge.FromNodeID
-				if neighborID == frontierID {
-					neighborID = edge.ToNodeID
-				}
-				if _, seen := visited[neighborID]; seen {
-					continue
-				}
-				if baseScore > nextScores[neighborID] {
-					nextScores[neighborID] = baseScore
+		take := func(frontierID, neighborID string) {
+			if _, seen := visited[neighborID]; seen {
+				return
+			}
+			if score := frontierScores[frontierID]; score > nextScores[neighborID] {
+				nextScores[neighborID] = score
+			}
+		}
+		if confined := opts.Collection != "" || db.walkAdmit(ctx) != nil; confined {
+			if err := db.confinedExpansionSteps(ctx, frontierIDs, opts.Collection, take); err != nil {
+				return nil, err
+			}
+		} else {
+			for _, frontierID := range frontierIDs {
+				for _, edge := range edgeMap[frontierID] {
+					neighborID := edge.FromNodeID
+					if neighborID == frontierID {
+						neighborID = edge.ToNodeID
+					}
+					take(frontierID, neighborID)
 				}
 			}
 		}
@@ -339,4 +347,57 @@ func (db *DB) entityLinkedChunks(ctx context.Context, entityIDs []string, collec
 		}
 	}
 	return out, nil
+}
+
+// confinedExpansionSteps is one round of the graph expansion of a search
+// with a collection or under a caller scope: from each frontier node, the
+// steps the collection may take (laneScope.mayEnter), as the graph lane of a
+// query takes them, and under a caller scope only the steps the caller is
+// served (walkAdmit). Keeping only the collection's chunks at the end let
+// the walk cross a relation only another collection states, or a chunk no
+// collection of the search holds, and a chunk of the collection reached that
+// way told the caller what the other collection states. It reads each
+// frontier node's edges whole, since both rules read an edge's provenance.
+func (db *DB) confinedExpansionSteps(ctx context.Context, frontierIDs []string, collection string, take func(from, next string)) error {
+	admit := db.walkAdmit(ctx)
+	type fromStep struct {
+		from string
+		step laneStep
+	}
+	var steps []fromStep
+	for _, id := range frontierIDs {
+		edges, err := db.graph.GetEdges(ctx, id, "both")
+		if err != nil {
+			return err
+		}
+		if admit != nil {
+			if edges, err = admit(ctx, id, edges); err != nil {
+				return err
+			}
+		}
+		for _, edge := range edges {
+			steps = append(steps, fromStep{id, laneStep{edge: edge, next: farEnd(edge, id)}})
+		}
+	}
+	if len(steps) == 0 {
+		return nil
+	}
+	var lane laneScope
+	if collection != "" {
+		read := make([]laneStep, len(steps))
+		for i, s := range steps {
+			read[i] = s.step
+		}
+		var err error
+		if lane, err = db.laneScopeOf(ctx, collection, read); err != nil {
+			return err
+		}
+	}
+	for _, s := range steps {
+		if collection != "" && !lane.mayEnter(s.step) {
+			continue
+		}
+		take(s.from, s.step.next)
+	}
+	return nil
 }
