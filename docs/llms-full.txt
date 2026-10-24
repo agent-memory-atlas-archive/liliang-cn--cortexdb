@@ -406,6 +406,15 @@ res, _ := db.VerifyClaims(ctx, []cortexdb.Claim{{Subject: "Leo", Relation: "live
 // res.Verdicts[0].Status == "contradicted", Reason == "single_valued_conflict"
 ```
 
+`CheckAgainstSources` (tool `check_against_sources`) checks prose instead of
+triples: each sentence names the documents or chunks it cites, and the call
+lists the facts of the sentence (numbers, and names or acronyms written in
+Latin script) that none of those sources contains. A number is found only
+whole, a name only as a word of the source (APIs holds API; metadata does
+not hold Meta); case and accents are folded, and `equivalents` lets a
+caller say that "48 kHz" also stands for "48kHz". Han, kana and hangul runs
+are not checked. Deterministic; no model.
+
 `GraphHealth` (tool `graph_health`) is the shelf-wide counterpart: growth per
 producer with spike detection, the high in/out-degree tail, supersessions
 (closed facts, replaced versions, retractions) per day, and temporal

@@ -268,6 +268,12 @@ res, _ := db.VerifyClaims(ctx, []cortexdb.Claim{{Subject: "Leo", Relation: "live
 // res.Verdicts[0].Status == "contradicted", Reason == "single_valued_conflict"
 ```
 
+`CheckAgainstSources`（工具 `check_against_sources`）核的是成段文字而不是三元组：
+每句话注明它引用的文档或 chunk，调用返回这句话里哪些事实（数字，以及拉丁字母写的
+名字和缩写）在所引来源里都找不到。数字只按整体匹配，名字只按来源里的整词匹配
+（APIs 里有 API，metadata 里没有 Meta）；大小写和重音不区分，`equivalents` 可以声明
+"48 kHz" 也算 "48kHz"。汉字、假名、谚文不检查。确定性，不调模型。
+
 `GraphHealth`（工具 `graph_health`）是全书架层面的对应物：按 producer 的增长（带突增检测）、
 入度/出度长尾、每天的 supersede 次数（关闭的事实、被替换的版本、撤回）、时间不变式
 （单值关系上区间重叠，或区间结束早于开始）。每项检查都报告自己是否报警。
