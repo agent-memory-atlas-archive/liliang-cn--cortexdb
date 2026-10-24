@@ -4,6 +4,69 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.139.0] - 2026-10-24
+
+### Security
+
+- A request body that names one field twice (the same key, or two spellings
+  encoding/json reads into one field, such as `query` and `QUERY` or
+  `user_id` and `uſer_id`), at any depth, is refused with 400 on REST and
+  InvalidArgument on gRPC when it comes from a confined or read-only key,
+  before any policy reads it. The policy read the last copy of a key, by its
+  exact spelling, and the handler a different one, so such a body could read,
+  overwrite or delete another collection's or user's rows, and a read-only
+  key could run a SPARQL update. Reported privately by Lauro Foletti.
+- Under a caller scope, the graph tools (expand_graph, get_nodes,
+  knowledge_memory_neighbors, knowledge_memory_shortest_path,
+  knowledge_memory_expand_entity_context, search_paths,
+  search_chunks_by_entities) walk only the nodes and edges the caller is
+  served. They walked the whole graph and served the caller's own nodes they
+  reached, which told a key confined to one collection what another
+  collection states, through a relation or a chunk it could not read.
+- The request log quotes a tool name that is not a plain word, so a caller
+  cannot write fields or lines of its own into it.
+
+### Added
+
+- Confined keys may call the graph tools, confined by the facade (#97,
+  #95, #96, #94); the graph lane of a query with a collection walks only that
+  collection's graph (#98). Lauro Foletti.
+- Servers read the key file again when it changes (#87); every typed write
+  signs `written_by` from the calling key (#88); extract_conversation,
+  memory_list_all and promote_to_knowledge honour the caller's memory scope
+  (#89); the request log names the rows a tool call names (#90). Lauro
+  Foletti.
+- `knowledge_get` takes a list of ids, at most 100, each served once, as
+  `memory_get` now does too (#91). Lauro Foletti.
+- `check_against_sources`: the facts of a sentence (numbers, names) that its
+  cited sources do not contain, with no model involved; a name is found as a
+  word of a source, not inside another word (#92). Lauro Foletti.
+- `glama.json` names the maintainer for the Glama listing.
+
+### Changed
+
+- The duplicate graph indexes idx_edges_from and idx_edges_to are dropped;
+  the composite and walk indexes serve the same queries (#93). Lauro Foletti.
+- Keyword retrieval folds accents as the word index does (#100), the words
+  of alternate queries join the keyword query (#101), and with alternate
+  queries or keywords every phrasing runs, fused by rank (#102); a Swiss
+  lexical retrieval set joins the eval (#99). Lauro Foletti.
+- In that fusion the question's own lists count in full and those of
+  alternate queries and keywords half; an alternate whose words are all in
+  the question is left out, ties go to the question's own rank, the
+  keyword floor is applied before the cut to top_k, and the alternates and
+  synonyms a search measures are capped. On a snapshot of a live brain, with
+  planned queries (lexical): knowledge hit@3 8/18 → 14/18 and memory
+  off-topic rows 6 → 3; on the golden sets as written, unchanged.
+
+### Fixed
+
+- Two documents that state the same relation keep an edge each, with its
+  own provenance; the second overwrote the first's.
+- cortexdb-live: a recall whose reply passes the host's size limit is asked
+  again as an index, and a reply that is not JSON is reported by what it
+  says instead of as a JSON parse error.
+
 ## [2.138.0] - 2026-10-23
 
 ### Changed
