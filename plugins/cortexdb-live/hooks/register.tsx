@@ -129,11 +129,27 @@ async function serverOf($: EngineInterface) {
   return server
 }
 
+// A reply that is not JSON is the host's, not the server's: Claude Code
+// swaps a tool result past its token limit for a line of text that starts
+// "Error:" and does not flag it as an error. Its opening words say which.
+class NotJSON extends Error {
+  constructor(tool: string, readonly reply: string) {
+    super(`${tool}: ${reply.slice(0, 120).replace(/\s+/g, ' ') || 'empty reply'}`)
+  }
+  get tooLarge() {
+    return /exceeds maximum allowed tokens/i.test(this.reply)
+  }
+}
+
 async function callTool($: EngineInterface, tool: string, args: Record<string, unknown>) {
   const result = await $.mcp.call(await serverOf($), tool, args)
   const text = result.content.find(block => block.type === 'text')?.text ?? ''
   if (result.isError) throw new Error(text.slice(0, 200) || `${tool} failed`)
-  return JSON.parse(text) as unknown
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    throw new NotJSON(tool, text)
+  }
 }
 
 function showStatus($: EngineInterface) {
@@ -298,11 +314,13 @@ async function recall($: EngineInterface, prompt: string): Promise<Recall | 'ski
   const started = await $.clock.now()
   const { args, plan, skip } = await planRecall($, prompt)
   if (skip) return 'skip'
-  const payload = (await callTool($, 'knowledge_memory_recall', {
-    ...args,
-    top_k_memories: TOP_K,
-    top_k_knowledge: TOP_K,
-    graph_light: true,
+  const asked = { ...args, top_k_memories: TOP_K, top_k_knowledge: TOP_K, graph_light: true }
+  // A hit that is one long document can take the whole reply past the host's
+  // limit. The index of the same recall is a line per hit: it loses who wrote
+  // each one, and keeps the recall.
+  const payload = (await callTool($, 'knowledge_memory_recall', asked).catch(err => {
+    if (err instanceof NotJSON && err.tooLarge) return callTool($, 'knowledge_memory_recall', { ...asked, detail: 'index' })
+    throw err
   })) as RecallPayload
   const terms = [...plan.keywords, ...plan.entities]
   const memoryMode = payload.memory_decision?.effective_mode

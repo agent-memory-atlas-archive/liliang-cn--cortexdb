@@ -71,6 +71,8 @@ type World = {
   host?: string
   payload?: object
   isBrainDown?: boolean
+  hostReply?: string
+  indexFits?: boolean
   isDenied?: boolean
   connectsAfter?: number
 }
@@ -111,6 +113,9 @@ const world = (on: On, w: World): Seen => {
     }
     if (w.isDenied) return { deny: 'Claude requested permissions to use this tool, but you have not granted it yet.' }
     if (w.isBrainDown) return { value: { content: [{ type: 'text', text: 'dial tcp: refused' }], isError: true } }
+    if (w.hostReply && !(w.indexFits && e.args.detail === 'index')) {
+      return { value: { content: [{ type: 'text', text: w.hostReply }], isError: false } }
+    }
     const isCaptureLookup = e.tool === 'knowledge_memory_recall' && e.args.disable_knowledge === true
     const body =
       e.tool === 'graph_statistics'
@@ -226,6 +231,27 @@ test('a brain that fails keeps the shell block', async ($, on) => {
   const out = await $.classic.UserPromptSubmit({ prompt: 'anything' })
 
   expect(out.additionalContext).toEqual([SHELL, 'another plugin'])
+})
+
+const TOO_LARGE = 'Error: result (31,204 tokens) exceeds maximum allowed tokens. Output has been saved to /tmp/r.txt'
+
+test('a recall past the host limit is asked again as an index', async ($, on) => {
+  const seen = world(on, { autorecall: 'on', hostReply: TOO_LARGE, indexFits: true })
+
+  const out = await $.classic.UserPromptSubmit({ prompt: 'how do we indent Go?' })
+
+  const recalls = seen.calls.filter(c => c.tool === 'knowledge_memory_recall')
+  expect(recalls.map(c => c.args.detail)).toEqual([undefined, 'index'])
+  expect(out.additionalContext.join('\n')).toContain('pref-tabs')
+})
+
+test('a reply that is not JSON is reported by what it says', async ($, on) => {
+  const seen = world(on, { autorecall: 'on', hostReply: 'Error: the MCP server went away' })
+
+  const out = await $.classic.UserPromptSubmit({ prompt: 'how do we indent Go?' })
+
+  expect(out.additionalContext).toEqual([SHELL, 'another plugin'])
+  expect(seen.status.at(-1)).toContain('knowledge_memory_recall: Error: the MCP server went away')
 })
 
 const linstor = [
