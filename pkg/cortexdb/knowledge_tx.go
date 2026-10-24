@@ -657,7 +657,7 @@ func (db *DB) appendKnowledgeExplicitArtifacts(ctx context.Context, input knowle
 		return err
 	}
 
-	for i, rel := range relations {
+	for _, rel := range relations {
 		fromID, err := db.ontologyRelationEndpointNodeID(ctx, compiled, rel.From)
 		if err != nil {
 			return err
@@ -670,7 +670,13 @@ func (db *DB) appendKnowledgeExplicitArtifacts(ctx context.Context, input knowle
 			continue
 		}
 		edgeType := firstNonEmpty(rel.Type, "related_to")
-		edgeID := fmt.Sprintf("edge:relation:%s:%s:%s:%d", fromID, toID, edgeType, i)
+		// Named by what the edge connects and the document that states it
+		// (relationEdgeID), not by its place in the request: two documents
+		// stating the same relation are two edges, each with its own
+		// provenance, where an id ending in the index let the second
+		// overwrite the first's document_id, and a scope reading the edge
+		// then took it for the other document's.
+		edgeID := relationEdgeID(fromID, toID, edgeType, input.KnowledgeID)
 		ingest.relationEdgeIDs = append(ingest.relationEdgeIDs, edgeID)
 
 		properties := map[string]any{}
@@ -699,6 +705,11 @@ func (db *DB) appendKnowledgeExplicitArtifacts(ctx context.Context, input knowle
 		weight := rel.Weight
 		if weight == 0 {
 			weight = 1.0
+		}
+		// The same relation twice in one request is one edge.
+		if seen, ok := edgeMap[edgeID]; ok {
+			mergeRelationProperties(seen.Properties, properties)
+			continue
 		}
 		edgeMap[edgeID] = &graph.GraphEdge{
 			ID:         edgeID,
