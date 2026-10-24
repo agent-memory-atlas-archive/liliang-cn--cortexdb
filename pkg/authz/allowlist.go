@@ -262,6 +262,9 @@ var confinedTools = map[string]toolRule{
 	// may not read, the memories of a bucket it may not read, and the
 	// entities no permitted collection lists, and serves an entity with its
 	// id and name alone (cortexdb's withoutExpiredDocuments, servedSeeds).
+	// The walk itself takes only those nodes and the edges the key's
+	// collections state (cortexdb's walkAdmit), so what it reaches, a limit,
+	// a score and a path are of the key's part of the graph alone.
 	// Node ids and entity names are data, as plan.filters.document_ids is:
 	// a node the scope hides answers as a node that does not exist, a name
 	// included whose best match it hides, so loading it here and refusing
