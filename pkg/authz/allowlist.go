@@ -689,10 +689,17 @@ func valuesAt(obj map[string]any, path string) []string {
 }
 
 // rowData are the data arguments that name rows without the guard loading
-// them: the list form of memory_get, which the facade answers with missing,
-// and plan.filters.document_ids, a pin the collection filter decides. The
-// request log records them beside the ids the guard loads.
-var rowData = []string{"memory_ids", "plan.filters.document_ids"}
+// them: the list forms of memory_get and knowledge_get, which the facade
+// answers with missing; plan.filters.document_ids, a pin the collection
+// filter decides; the nodes a graph tool starts from or walks to, which the
+// facade answers as nodes that do not exist when the scope hides them; and
+// the sources a check cites, which it answers as missing. The request log
+// records them beside the ids the guard loads.
+var rowData = []string{
+	"memory_ids", "knowledge_ids", "plan.filters.document_ids",
+	"node_id", "node_ids", "entity_ids", "from_node_id", "to_node_id",
+	"sentences[].sources",
+}
 
 // rowPaths are the argument paths of the tool that name rows: its ids, and
 // the rowData it takes.

@@ -14,31 +14,40 @@ import (
 // collection filter decides). A tool of the allowlist that names no row is
 // listed with none.
 var loggedPaths = map[string][]string{
-	"ingest_document":                     {"document_id"},
-	"knowledge_save":                      {"knowledge_id"},
-	"knowledge_update":                    {"knowledge_id"},
-	"knowledge_get":                       {"knowledge_id"},
-	"knowledge_delete":                    {"knowledge_id"},
-	"memory_save":                         {"memory_id", "supersedes"},
-	"knowledge_memory_remember":           {"memory_id"},
-	"memory_get":                          {"memory_id", "memory_ids"},
-	"memory_update":                       {"memory_id"},
-	"memory_delete":                       {"memory_id"},
-	"knowledge_search":                    {"plan.filters.document_ids"},
-	"search_text":                         {"plan.filters.document_ids"},
-	"search_graphrag_lexical":             {"plan.filters.document_ids"},
-	"memory_search":                       {"plan.filters.document_ids"},
-	"knowledge_memory_recall":             {"plan.filters.document_ids"},
-	"knowledge_memory_build_context_pack": {"plan.filters.document_ids"},
-	"search_vector_range":                 nil,
-	"aggregate_metadata":                  nil,
-	"representative_records":              nil,
-	"extract_conversation":                nil,
+	"ingest_document":                        {"document_id"},
+	"knowledge_save":                         {"knowledge_id"},
+	"knowledge_update":                       {"knowledge_id"},
+	"knowledge_get":                          {"knowledge_id", "knowledge_ids"},
+	"knowledge_delete":                       {"knowledge_id"},
+	"memory_save":                            {"memory_id", "supersedes"},
+	"knowledge_memory_remember":              {"memory_id"},
+	"memory_get":                             {"memory_id", "memory_ids"},
+	"memory_update":                          {"memory_id"},
+	"memory_delete":                          {"memory_id"},
+	"knowledge_search":                       {"plan.filters.document_ids"},
+	"search_text":                            {"plan.filters.document_ids"},
+	"search_graphrag_lexical":                {"plan.filters.document_ids"},
+	"memory_search":                          {"plan.filters.document_ids"},
+	"knowledge_memory_recall":                {"plan.filters.document_ids"},
+	"knowledge_memory_build_context_pack":    {"plan.filters.document_ids"},
+	"search_vector_range":                    nil,
+	"aggregate_metadata":                     nil,
+	"representative_records":                 nil,
+	"extract_conversation":                   nil,
+	"check_against_sources":                  {"sentences[].sources"},
+	"search_chunks_by_entities":              nil,
+	"search_paths":                           {"node_ids"},
+	"knowledge_memory_expand_entity_context": {"entity_ids"},
+	"expand_graph":                           {"node_ids"},
+	"get_nodes":                              {"node_ids"},
+	"knowledge_memory_neighbors":             {"node_id"},
+	"knowledge_memory_shortest_path":         {"from_node_id", "to_node_id"},
 }
 
 // argsAt builds tool arguments with a value at each path: two ids in an
-// array for a path whose last segment is plural or a list (supersedes), one
-// id otherwise, under the path as spelled.
+// array for a path whose last segment is plural or a list (supersedes,
+// sources), one id otherwise, under the path as spelled; a segment that ends
+// in [] is an array holding one object.
 func argsAt(paths []string, extra map[string]any) ([]byte, map[string][]string) {
 	obj := map[string]any{}
 	for k, v := range extra {
@@ -50,16 +59,24 @@ func argsAt(paths []string, extra map[string]any) ([]byte, map[string][]string) 
 		last := segs[len(segs)-1]
 		var v any = "id-" + last
 		want[p] = []string{"id-" + last}
-		if strings.HasSuffix(last, "_ids") || last == "supersedes" {
+		if strings.HasSuffix(last, "_ids") || last == "supersedes" || last == "sources" {
 			v = []any{"id-" + last + "-2", "id-" + last + "-1"}
 			want[p] = []string{"id-" + last + "-1", "id-" + last + "-2"}
 		}
 		at := obj
 		for _, s := range segs[:len(segs)-1] {
-			next, _ := at[s].(map[string]any)
-			if next == nil {
+			name, each := strings.CutSuffix(s, "[]")
+			var next map[string]any
+			if each {
+				list, _ := at[name].([]any)
+				if len(list) == 0 {
+					list = []any{map[string]any{}}
+					at[name] = list
+				}
+				next = list[0].(map[string]any)
+			} else if next, _ = at[name].(map[string]any); next == nil {
 				next = map[string]any{}
-				at[s] = next
+				at[name] = next
 			}
 			at = next
 		}
