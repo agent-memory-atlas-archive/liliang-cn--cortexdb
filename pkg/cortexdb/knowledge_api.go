@@ -364,6 +364,12 @@ func (db *DB) SearchKnowledge(ctx context.Context, req KnowledgeSearchRequest) (
 		Plan:                &resolution.Plan,
 	}
 
+	// The keyword floor applied below is handed to the lexical candidate
+	// search too, which fills top_k with the rows that pass it first.
+	if resolution.Decision.EffectiveMode != RetrievalModePPR {
+		ctx = withKnowledgeKeywordFloor(ctx, db.newKnowledgeKeywordFloor(ctx, resolution.Plan, opts.Collection))
+	}
+
 	var result *GraphRAGQueryResult
 	var err error
 	if resolution.Decision.EffectiveMode == RetrievalModePPR {

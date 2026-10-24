@@ -171,9 +171,11 @@ func (t *GraphRAGToolbox) searchTextPhrasings(ctx context.Context, resolution re
 	return t.cutTextCandidates(ctx, ordered, searchOpts.TopK, resolution), nil
 }
 
-// cutTextCandidates cuts the ranked candidates of a text search to topK and
-// applies the plan's filters.
+// cutTextCandidates cuts the ranked candidates of a text search to topK,
+// the rows that pass SearchKnowledge's keyword floor first (see
+// keywordFloorFirst), and applies the plan's filters.
 func (t *GraphRAGToolbox) cutTextCandidates(ctx context.Context, ordered []core.ScoredEmbedding, topK int, resolution retrievalPlanResolution) []core.ScoredEmbedding {
+	ordered = keywordFloorFirst(ctx, ordered, topK)
 	if len(ordered) > topK {
 		ordered = ordered[:topK]
 	}

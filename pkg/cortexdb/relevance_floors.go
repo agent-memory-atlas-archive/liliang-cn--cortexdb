@@ -6,6 +6,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/liliang-cn/cortexdb/v2/pkg/core"
 )
 
 // Minimum relevance for keyword memory hits and for knowledge hits.
@@ -97,24 +100,17 @@ func (db *DB) applyKnowledgeFloors(ctx context.Context, result *GraphRAGQueryRes
 		return nil
 	}
 	// The keyword score needs a scan of the chunks searched, so it is taken
-	// only for a chunk the cheaper evidence did not already keep.
-	var scorer *rarityScorer
+	// only for a chunk the cheaper evidence did not already keep. The lexical
+	// candidate search under this search may have taken it already.
+	keyword := knowledgeKeywordFloorOf(ctx)
+	if keyword == nil {
+		keyword = db.newKnowledgeKeywordFloor(ctx, plan, collection)
+	}
 	byKeyword := func(chunk GraphRAGChunkResult) (bool, error) {
 		if keywordFloor <= 0 {
 			return chunk.VectorRank == 0 || chunk.LexicalRank > 0, nil
 		}
-		if scorer == nil {
-			synonyms := append(append(append([]string{}, plan.Keywords...), plan.AlternateQueries...), plan.EntityNames...)
-			q := newRarityQuery(plan.Query, synonyms)
-			if len(plan.AlternateQueries) > 0 {
-				q.common = db.chunkVariantWords(ctx, collection, plan.AlternateQueries).commonBeside(append(append([]string{}, plan.Keywords...), plan.EntityNames...))
-			}
-			var err error
-			if scorer, err = db.chunkRarityScorer(ctx, collection, q); err != nil {
-				return false, err
-			}
-		}
-		return scorer.answers(scorer.coverage(chunk.Content), keywordFloor), nil
+		return keyword.passes(chunk.Content)
 	}
 	graphAsked := decision.RequestedMode == RetrievalModeGraph
 	kept := result.Chunks[:0:0]
@@ -139,6 +135,91 @@ func (db *DB) applyKnowledgeFloors(ctx context.Context, result *GraphRAGQueryRes
 	result.Windows = nil
 	result.Context = buildGraphRAGContext(kept)
 	return db.widenGraphRAGContext(ctx, result, opts)
+}
+
+// knowledgeKeywordFloor is the keyword test of the knowledge floor for one
+// search: whether a chunk covers the keyword floor of the question, terms
+// weighted by rarity among the chunks searched, and more than one of its
+// words. The scorer is built on first use, once, and shared by the lexical
+// candidate search under SearchKnowledge (see keywordFloorFirst) and by
+// applyKnowledgeFloors.
+type knowledgeKeywordFloor struct {
+	floor  float64
+	once   sync.Once
+	build  func() (*rarityScorer, error)
+	scorer *rarityScorer
+	err    error
+}
+
+// newKnowledgeKeywordFloor is the keyword floor of a search for plan over
+// collection, or nil when the floor is off.
+func (db *DB) newKnowledgeKeywordFloor(ctx context.Context, plan RetrievalPlan, collection string) *knowledgeKeywordFloor {
+	if db.knowledgeKeywordFloor <= 0 {
+		return nil
+	}
+	return &knowledgeKeywordFloor{floor: db.knowledgeKeywordFloor, build: func() (*rarityScorer, error) {
+		synonyms := append(append(append([]string{}, plan.Keywords...), plan.AlternateQueries...), plan.EntityNames...)
+		q := newRarityQuery(plan.Query, synonyms)
+		if len(plan.AlternateQueries) > 0 {
+			q.common = db.chunkVariantWords(ctx, collection, plan.AlternateQueries).commonBeside(append(append([]string{}, plan.Keywords...), plan.EntityNames...))
+		}
+		return db.chunkRarityScorer(ctx, collection, q)
+	}}
+}
+
+// passes reports whether content passes the keyword floor.
+func (f *knowledgeKeywordFloor) passes(content string) (bool, error) {
+	f.once.Do(func() { f.scorer, f.err = f.build() })
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.scorer.answers(f.scorer.coverage(content), f.floor), nil
+}
+
+type knowledgeKeywordFloorKey struct{}
+
+// withKnowledgeKeywordFloor hands floor to the lexical candidate search under
+// ctx; a nil floor hands none.
+func withKnowledgeKeywordFloor(ctx context.Context, floor *knowledgeKeywordFloor) context.Context {
+	if floor == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, knowledgeKeywordFloorKey{}, floor)
+}
+
+func knowledgeKeywordFloorOf(ctx context.Context) *knowledgeKeywordFloor {
+	floor, _ := ctx.Value(knowledgeKeywordFloorKey{}).(*knowledgeKeywordFloor)
+	return floor
+}
+
+// keywordFloorFirst puts the rows that pass the keyword floor of the search
+// ahead of those that do not, each in its order, before a list of more than
+// topK rows is cut to topK: the floor applyKnowledgeFloors takes after the
+// cut would otherwise leave fewer than topK, with passing rows below the cut
+// unseen. The rows that fail are moved, not dropped: the vector search or a
+// named entity may still keep one. Without a floor in ctx (a search other
+// than SearchKnowledge, or the floor off) the list is unchanged; when the
+// floor cannot be measured it is unchanged too, and applyKnowledgeFloors
+// reports the error.
+func keywordFloorFirst(ctx context.Context, rows []core.ScoredEmbedding, topK int) []core.ScoredEmbedding {
+	floor := knowledgeKeywordFloorOf(ctx)
+	if floor == nil || topK <= 0 || len(rows) <= topK {
+		return rows
+	}
+	passed := make([]core.ScoredEmbedding, 0, len(rows))
+	var failed []core.ScoredEmbedding
+	for _, row := range rows {
+		ok, err := floor.passes(row.Content)
+		if err != nil {
+			return rows
+		}
+		if ok {
+			passed = append(passed, row)
+		} else {
+			failed = append(failed, row)
+		}
+	}
+	return append(passed, failed...)
 }
 
 // namesQueryEntity reports whether one of a chunk's entities is one the

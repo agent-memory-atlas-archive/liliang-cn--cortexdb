@@ -409,3 +409,59 @@ func TestFusedPhrasingsLeaveOutAnAlternateOfTheQuestionsWords(t *testing.T) {
 	}
 }
 
+// SearchKnowledge's keyword floor runs after the cut to top_k. The rows that
+// pass it fill top_k first: the short rows that hold only the keyword rank
+// first in the keyword OR query, and would have filled the three and been
+// dropped, leaving nothing.
+func TestKnowledgeFloorFillsTopKBeforeTheCut(t *testing.T) {
+	db, err := Open(DefaultConfig(filepath.Join(t.TempDir(), "floor.db")))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	save := func(id, content string) {
+		if _, err := db.SaveKnowledge(ctx, KnowledgeSaveRequest{KnowledgeID: id, Content: content, Collection: "kb"}); err != nil {
+			t.Fatalf("save %s: %v", id, err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		save(fmt.Sprintf("only-keyword-%d", i), "Falcon falcon falcon.")
+	}
+	long := strings.Repeat(" Ringing records from the observatory, kept by volunteers, count every bird that passes the nets.", 6)
+	save("answer-a", "The kestrel keeps to one migration path along the coast, year after year."+long)
+	save("answer-b", "Each autumn the kestrel starts its migration a week later than the year before."+long)
+	for i := 0; i < 8; i++ {
+		save(fmt.Sprintf("filler-%d", i), fmt.Sprintf("Note %d on garden birds: sparrows, robins and wrens at the feeder.", i))
+	}
+	req := ToolSearchTextRequest{Query: "kestrel migration route", Collection: "kb", TopK: 3, Keywords: []string{"falcon"}}
+	resp, err := db.GraphRAGTools().SearchText(ctx, req)
+	if err != nil {
+		t.Fatalf("search_text: %v", err)
+	}
+	for _, c := range resp.Chunks {
+		if !strings.HasPrefix(c.DocumentID, "only-keyword-") {
+			t.Fatalf("search_text top 3 %v: the test needs the keyword-only rows to fill it", chunkDocs(resp.Chunks))
+		}
+	}
+	got, err := db.SearchKnowledge(ctx, KnowledgeSearchRequest{Query: req.Query, Collection: "kb", TopK: 3, Keywords: req.Keywords, RetrievalMode: RetrievalModeLexical})
+	if err != nil {
+		t.Fatalf("SearchKnowledge: %v", err)
+	}
+	var ids []string
+	for _, h := range got.Results {
+		ids = append(ids, h.KnowledgeID)
+	}
+	slices.Sort(ids)
+	if !slices.Equal(ids, []string{"answer-a", "answer-b"}) {
+		t.Errorf("SearchKnowledge top 3: %v, want answer-a and answer-b", ids)
+	}
+}
+
+func chunkDocs(chunks []ToolChunk) []string {
+	out := make([]string, len(chunks))
+	for i, c := range chunks {
+		out[i] = c.DocumentID
+	}
+	return out
+}
