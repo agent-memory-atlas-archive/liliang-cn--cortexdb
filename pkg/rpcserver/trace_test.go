@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -126,5 +127,33 @@ func TestAFastCallIsQuietUnlessTracingIsOn(t *testing.T) {
 	}
 	if got := runThrough(t, TraceOptions{All: true, Slow: time.Second}, quick); !strings.Contains(got, "rpc=SearchMemory") || strings.Contains(got, "(slow)") {
 		t.Fatalf("with tracing on every call is logged: %q", got)
+	}
+}
+
+// The tool name is the caller's and is logged before the key is checked, so
+// a name that is not a plain word is quoted: one call with a wrong key
+// cannot write a line of its own, or a field such as key=operator, into the
+// log.
+func TestACallerCannotWriteFieldsOrLinesIntoTheLog(t *testing.T) {
+	for _, name := range []string{
+		"knowledge_get\ncortexdb-trace rpc=CallTool dur=0.00s key=operator tool=knowledge_delete",
+		"knowledge_get key=operator",
+	} {
+		var buf, file bytes.Buffer
+		logged := RequestLogInterceptor(TraceOptions{All: true, Log: log.New(&buf, "", 0), File: &file})
+		auth := authInterceptor(readerAndWriter(t), nil)
+		info := &grpc.UnaryServerInfo{FullMethod: callToolMethod}
+		ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer wrong"))
+		req := &rpcv1.CallToolRequest{Name: name, ArgsJson: `{"knowledge_id":"k1\nkey=operator"}`}
+		_, _ = logged(ctx, req, info, func(ctx context.Context, req any) (any, error) {
+			return auth(ctx, req, info, func(context.Context, any) (any, error) { return nil, nil })
+		})
+		line := strings.TrimSpace(buf.String())
+		if strings.Contains(line, "\n") || !strings.Contains(line, " tool="+strconv.Quote(name)+" ") {
+			t.Errorf("tool %q is not one quoted field of one line:\n%s", name, line)
+		}
+		if strings.Count(strings.TrimSpace(file.String()), "\n") > 0 {
+			t.Errorf("tool %q: the trace file got more than one record", name)
+		}
 	}
 }

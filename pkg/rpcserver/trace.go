@@ -153,10 +153,10 @@ func RequestLogInterceptor(o TraceOptions) grpc.UnaryServerInterceptor {
 		}
 		line := "cortexdb-trace rpc=" + method + " dur=" + strconv.FormatFloat(dur.Seconds(), 'f', 2, 64) + "s"
 		if key != "" {
-			line += " key=" + key
+			line += " key=" + logValue(key)
 		}
 		if tool != "" {
-			line += " tool=" + tool
+			line += " tool=" + logValue(tool)
 		}
 		// The count only: the ids themselves go to the trace file.
 		if n := idCount(ids); n > 0 {
@@ -186,6 +186,22 @@ func RequestLogInterceptor(o TraceOptions) grpc.UnaryServerInterceptor {
 		}
 		return resp, err
 	}
+}
+
+// logValue is a value of the text line as it is when it is a plain word,
+// quoted otherwise. The tool name is the caller's, and the line is written
+// before the key is checked: unquoted, a name holding a space or a newline
+// wrote fields of its own (key=operator) into the line, or a line of its own.
+func logValue(s string) string {
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
+			return strconv.Quote(s)
+		}
+	}
+	if s == "" {
+		return `""`
+	}
+	return s
 }
 
 func idCount(ids map[string][]string) int {
