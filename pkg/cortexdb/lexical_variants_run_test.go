@@ -199,10 +199,10 @@ func TestCJKQuestionWithKeywordsKeepsItsBigramList(t *testing.T) {
 // the German row that holds all three keywords.
 func TestFusedPhrasingsCountTheQuestionsWordsOnce(t *testing.T) {
 	own := strings.Join(lexicalQueryKeywords(fillQuestion), " OR ")
-	if got := fusedPhrasings(fillQuestion, lexicalSearchQueries(fillQuestion, []string{"Bundesrat"}, nil, nil)); slices.Contains(got, own) || len(got) != 3 {
-		t.Errorf("with a keyword: queries %q, want three, without %q", got, own)
+	if got := phrasingQueries(fusedPhrasings(fillQuestion, nil, lexicalSearchQueries(fillQuestion, []string{"Bundesrat"}, nil, nil))); slices.Contains(got, own) || len(got) != 2 {
+		t.Errorf("with a keyword: queries %q, want two, without %q", got, own)
 	}
-	if got := fusedPhrasings(fillQuestion, lexicalSearchQueries(fillQuestion, nil, []string{"Bundesrat Verfahren Kantone"}, nil)); !slices.Contains(got, own) {
+	if got := phrasingQueries(fusedPhrasings(fillQuestion, []string{"Bundesrat Verfahren Kantone"}, lexicalSearchQueries(fillQuestion, nil, []string{"Bundesrat Verfahren Kantone"}, nil))); !slices.Contains(got, own) {
 		t.Errorf("with an alternate query only: queries %q lack the question's own OR query %q", got, own)
 	}
 	db := openFilledStore(t)
@@ -212,6 +212,15 @@ func TestFusedPhrasingsCountTheQuestionsWordsOnce(t *testing.T) {
 			t.Errorf("%s: results %v, want de-answer above or-only", name, got)
 		}
 	}
+}
+
+// phrasingQueries are the queries of phrasings, in order.
+func phrasingQueries(phrasings []lexicalPhrasing) []string {
+	out := make([]string, len(phrasings))
+	for i, p := range phrasings {
+		out[i] = p.query
+	}
+	return out
 }
 
 // When every phrasing fails, SearchTextOnly reports the failure.
@@ -233,7 +242,7 @@ func TestSearchTextOnlyAppliesThresholdBeforeFusion(t *testing.T) {
 	keywords := []string{"consultation", "Bundesrat"}
 	best := map[string]float64{}
 	top := 0.0
-	for _, q := range fusedPhrasings(fillQuestion, lexicalSearchQueries(fillQuestion, keywords, nil, nil)) {
+	for _, q := range phrasingQueries(fusedPhrasings(fillQuestion, nil, lexicalSearchQueries(fillQuestion, keywords, nil, nil))) {
 		rows, err := db.ftsSearch(ctx, q, TextSearchOptions{Collection: "kb", TopK: 40})
 		if err != nil {
 			t.Fatalf("ftsSearch %q: %v", q, err)
@@ -278,7 +287,7 @@ func TestSearchTextOnlyAppliesThresholdBeforeFusion(t *testing.T) {
 func TestLexicalFusionScoresByRankWithConstant60(t *testing.T) {
 	a := []core.ScoredEmbedding{{Embedding: core.Embedding{ID: "x"}, Score: 9}, {Embedding: core.Embedding{ID: "y"}, Score: 8}}
 	b := []core.ScoredEmbedding{{Embedding: core.Embedding{ID: "x"}, Score: 0.1}}
-	got := fuseLexicalLists(0, a, b)
+	got := fuseLexicalLists(0, lexicalList{rows: a, own: true}, lexicalList{rows: b, own: true})
 	want := map[string]float64{"x": 2.0 / 61, "y": 1.0 / 62}
 	if len(got) != 2 {
 		t.Fatalf("fused %d rows, want 2", len(got))
@@ -320,3 +329,83 @@ func TestPhrasingsRunToFourTimesTopK(t *testing.T) {
 		t.Errorf("search_text: %+v, %v, want x", resp, err)
 	}
 }
+
+// The question's own lists count in full, an alternate query's or the
+// keyword OR query's half. A row the question's own list puts first passes
+// one that two variant lists put second: 1/61 against 2 × 0.5/62. Weighed
+// the same, the variants would carry it, 2/62 against 1/61.
+func TestLexicalFusionWeighsVariantListsHalf(t *testing.T) {
+	row := func(id string) core.ScoredEmbedding { return core.ScoredEmbedding{Embedding: core.Embedding{ID: id}} }
+	got := fuseLexicalLists(0,
+		lexicalList{rows: []core.ScoredEmbedding{row("answer")}, own: true},
+		lexicalList{rows: []core.ScoredEmbedding{row("x"), row("variant")}},
+		lexicalList{rows: []core.ScoredEmbedding{row("y"), row("variant")}},
+	)
+	if len(got) != 4 || got[0].ID != "answer" {
+		t.Fatalf("fused %v, want answer first", fusedIDs(got))
+	}
+	want := map[string]float64{"answer": 1.0 / 61, "variant": 1.0 / 62, "x": 0.5 / 61, "y": 0.5 / 61}
+	for _, r := range got {
+		if math.Abs(r.Score-want[r.ID]) > 1e-12 {
+			t.Errorf("%s: score %.6f, want %.6f", r.ID, r.Score, want[r.ID])
+		}
+	}
+	// The CJK bigram list of a question in two scripts counts for the share
+	// of the question its CJK text is.
+	half := fuseLexicalLists(0, lexicalList{rows: []core.ScoredEmbedding{row("cjk")}, own: true, share: 0.5})
+	if math.Abs(half[0].Score-0.5/61) > 1e-12 {
+		t.Errorf("a list of half the question: score %.6f, want %.6f", half[0].Score, 0.5/61)
+	}
+	if s := cjkShareOfQuestion("网站的备案号"); s != 1 {
+		t.Errorf("share of a Chinese question: %v, want 1", s)
+	}
+	if s := cjkShareOfQuestion("harness release"); s != 0 {
+		t.Errorf("share of an English question: %v, want 0", s)
+	}
+	if s := cjkShareOfQuestion("harness 仓库 crates"); s <= 0 || s >= 1 {
+		t.Errorf("share of a question in two scripts: %v, want between 0 and 1", s)
+	}
+}
+
+// Rows that score the same are ordered by their rank in the question's own
+// lists, a row none of them holds after, not by id: "z-own", first in the
+// question's list, scores 1/61, as "a-variant" does, first in two variant
+// lists.
+func TestLexicalFusionBreaksTiesByTheQuestionsOwnRank(t *testing.T) {
+	row := func(id string) core.ScoredEmbedding { return core.ScoredEmbedding{Embedding: core.Embedding{ID: id}} }
+	got := fuseLexicalLists(0,
+		lexicalList{rows: []core.ScoredEmbedding{row("a-variant")}},
+		lexicalList{rows: []core.ScoredEmbedding{row("a-variant")}},
+		lexicalList{rows: []core.ScoredEmbedding{row("z-own")}, own: true},
+	)
+	if len(got) != 2 || got[0].Score != got[1].Score {
+		t.Fatalf("fused %v, the test needs a tie", got)
+	}
+	if ids := fusedIDs(got); !slices.Equal(ids, []string{"z-own", "a-variant"}) {
+		t.Errorf("fused %v, want z-own before a-variant", ids)
+	}
+}
+
+func fusedIDs(rows []core.ScoredEmbedding) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.ID
+	}
+	return out
+}
+
+// An alternate query whose every word is in the question adds no list: the
+// question's OR query and its CJK bigrams search for those words already, and
+// a row holding them would be counted twice. One with a word of its own runs.
+func TestFusedPhrasingsLeaveOutAnAlternateOfTheQuestionsWords(t *testing.T) {
+	question := "网站的工信部备案号和公安备案号分别是什么"
+	alternates := []string{"网站 备案号", "website ICP filing number"}
+	got := phrasingQueries(fusedPhrasings(question, alternates, lexicalSearchQueries(question, nil, alternates, nil)))
+	if slices.Contains(got, sanitizeFTSQuery("网站 备案号")) || !slices.Contains(got, sanitizeFTSQuery("website ICP filing number")) {
+		t.Errorf("queries %q, want the English variant and not the one of the question's words", got)
+	}
+	if !wordsOfQuestion("Conseil procédure", "procedure conseil") || wordsOfQuestion(fillQuestion, "procédure de consultation") {
+		t.Error("wordsOfQuestion: want accents folded, and a word of its own to count")
+	}
+}
+

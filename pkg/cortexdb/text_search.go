@@ -8,6 +8,8 @@ import (
 	"github.com/liliang-cn/cortexdb/v2/pkg/observability"
 	"github.com/liliang-cn/cortexdb/v2/pkg/sqldialect"
 	"log"
+	"math"
+	"sort"
 	"strings"
 
 	"github.com/liliang-cn/cortexdb/v2/internal/encoding"
@@ -438,15 +440,15 @@ func (db *DB) recallAuthorized(
 // searchTextOnlyExpanded is SearchTextOnly with keywords or alternate
 // queries: every phrasing runs, and their lists are fused by rank.
 func (db *DB) searchTextOnlyExpanded(ctx context.Context, query string, opts TextSearchOptions) ([]core.ScoredEmbedding, error) {
-	queries := fusedPhrasings(query, lexicalSearchQueries(query, opts.Keywords, opts.AlternateQueries, db.chunkVariantWords(ctx, opts.Collection, opts.AlternateQueries).kept))
-	if len(queries) == 0 {
+	phrasings := fusedPhrasings(query, opts.AlternateQueries, lexicalSearchQueries(query, opts.Keywords, opts.AlternateQueries, db.chunkVariantWords(ctx, opts.Collection, opts.AlternateQueries).kept))
+	if len(phrasings) == 0 {
 		return nil, ErrEmptyText
 	}
 
-	var lists [][]core.ScoredEmbedding
+	var lists []lexicalList
 	var firstErr error
-	for _, searchQuery := range queries {
-		results, err := db.ftsSearch(ctx, searchQuery, TextSearchOptions{
+	for _, phrasing := range phrasings {
+		results, err := db.ftsSearch(ctx, phrasing.query, TextSearchOptions{
 			Collection: opts.Collection,
 			TopK:       opts.TopK * 4,
 			Threshold:  opts.Threshold,
@@ -457,7 +459,7 @@ func (db *DB) searchTextOnlyExpanded(ctx context.Context, query string, opts Tex
 			}
 			continue
 		}
-		lists = append(lists, results)
+		lists = append(lists, lexicalList{rows: results, own: phrasing.own})
 	}
 
 	ordered := fuseLexicalLists(opts.TopK, lists...)
@@ -467,29 +469,72 @@ func (db *DB) searchTextOnlyExpanded(ctx context.Context, query string, opts Tex
 	return ordered, nil
 }
 
+// lexicalPhrasing is one full-text query of a search whose lists
+// fuseLexicalLists merges. own marks the question's own phrasings: the
+// question as typed, and its words OR-ed when that query runs.
+type lexicalPhrasing struct {
+	query string
+	own   bool
+}
+
 // fusedPhrasings are the queries of a search whose lists fuseLexicalLists
-// merges. The question's own OR query is left out when a keyword OR query
-// holds its words and more: every row it finds, that one finds too, and a
-// row that holds a word of the question would be counted twice for it, above
-// a row found through the keywords alone.
-func fusedPhrasings(question string, queries []string) []string {
-	own := strings.Join(lexicalQueryKeywords(strings.TrimSpace(question)), " OR ")
+// merges, from lexicalSearchQueries(question, …, alternateQueries, …).
+//
+// A phrasing that holds nothing the question's own lists do not is left out:
+// fused beside them, a row that holds words of the question would be counted
+// twice for them, above a row found through a keyword or a variant alone.
+//
+//   - The question's own OR query, when a keyword OR query holds its words
+//     and more: every row it finds, that one finds too.
+//   - The prefix form of the keyword OR query ("conseil* OR cantons*"): it
+//     finds the rows the plain form finds, in nearly the same order. (On the
+//     tool path it finds nothing besides: SearchTextOnly reads "*" as
+//     punctuation and the OR as a word.)
+//   - An alternate query whose every word is in the question ("网站 备案号"
+//     for "网站的工信部备案号…"): the question's OR query and its CJK bigram
+//     list search for those words already.
+func fusedPhrasings(question string, alternateQueries, queries []string) []lexicalPhrasing {
+	trimmed := strings.TrimSpace(question)
+	phrase := sanitizeFTSQuery(trimmed)
+	own := strings.Join(lexicalQueryKeywords(trimmed), " OR ")
+	redundant := map[string]bool{}
+	for _, alternate := range alternateQueries {
+		if q := sanitizeFTSQuery(strings.TrimSpace(alternate)); q != phrase && wordsOfQuestion(trimmed, alternate) {
+			redundant[q] = true
+		}
+	}
 	wider := false
 	for _, q := range queries {
 		if q != own && strings.Contains(q, " OR ") && !strings.Contains(q, "*") {
 			wider = true
 		}
 	}
-	if !wider {
-		return queries
-	}
-	kept := make([]string, 0, len(queries))
+	kept := make([]lexicalPhrasing, 0, len(queries))
 	for _, q := range queries {
-		if q != own {
-			kept = append(kept, q)
+		prefixOR := strings.Contains(q, " OR ") && strings.Contains(q, "*")
+		if prefixOR || redundant[q] || (wider && q == own) {
+			continue
 		}
+		kept = append(kept, lexicalPhrasing{query: q, own: q == phrase || q == own})
 	}
 	return kept
+}
+
+// wordsOfQuestion reports whether every word of text is a word of question,
+// compared without accents; a word in CJK script, which the question runs
+// into its neighbours, is one when the question contains it.
+func wordsOfQuestion(question, text string) bool {
+	lower := strings.ToLower(question)
+	words := map[string]bool{}
+	for _, w := range lexicalQueryKeywords(question) {
+		words[foldAccents(w)] = true
+	}
+	for _, w := range lexicalQueryKeywords(text) {
+		if !words[foldAccents(w)] && !(core.ContainsCJK(w) && strings.Contains(lower, w)) {
+			return false
+		}
+	}
+	return true
 }
 
 // lexicalFusionK is the constant of the reciprocal rank fusion of a search's
@@ -497,10 +542,48 @@ func fusedPhrasings(question string, queries []string) []string {
 // for a first row).
 const lexicalFusionK = 60
 
+// The weight of a list in the fusion. The question's own lists (the question
+// as typed, its own OR query, its CJK bigrams) count in full; a list of an
+// alternate query or of the keyword OR query counts half. They are synonyms
+// of the question, not more of it, as the coverage floor credits them (see
+// rarityExtraWeight): with equal weights a row that the question's bigram
+// list put first lost to one that two variants found low, as a variant's word
+// is in many rows the question is not about.
+const (
+	lexicalOwnListWeight     = 1.0
+	lexicalVariantListWeight = 0.5
+)
+
+// lexicalList is the result list of one phrasing, and whether it is one of
+// the question's own (see lexicalPhrasing). share, when above 0, is the part
+// of the question an own list searches for (see cjkShareOfQuestion), and
+// scales its weight.
+type lexicalList struct {
+	rows  []core.ScoredEmbedding
+	own   bool
+	share float64
+}
+
+// cjkShareOfQuestion is the part of question its CJK text is, in the units
+// the coverage floor weighs it in (see rarityCJKCharWeight): each content
+// character half a word, each other word one. The CJK bigram list searches
+// for that part only; of "harness 那个 Rust 仓库发新版本到 crates.io 要怎么操作"
+// it is half, and its bigrams of function words put rows that hold none of
+// harness, Rust or crates.io first.
+func cjkShareOfQuestion(question string) float64 {
+	cjk := float64(cjkQueryTerms(question).chars) * rarityCJKCharWeight
+	words := float64(len(rarityWords(question, math.MaxInt)))
+	if cjk+words == 0 {
+		return 0
+	}
+	return cjk / (cjk + words)
+}
+
 // fuseLexicalLists merges the result lists of a search's phrasings (the
-// question, each alternate query, the keyword OR queries, the CJK bigrams) by
-// reciprocal rank: a row scores the sum of 1/(lexicalFusionK + rank) over the
-// lists that hold it, and the topK best are returned (all when topK is 0).
+// question, each alternate query, the keyword OR query, the CJK bigrams) by
+// weighted reciprocal rank: a row scores the sum of weight/(lexicalFusionK +
+// rank) over the lists that hold it, and the topK best are returned (all when
+// topK is 0).
 //
 // Each query's bm25 is measured against its own terms, so the scores of two
 // queries do not compare: a short row that holds two words of the OR query
@@ -508,23 +591,59 @@ const lexicalFusionK = 60
 // that several phrasings find ranks above one that a single phrasing finds,
 // so a row that only a variant finds comes after the rows the question finds
 // whole.
-func fuseLexicalLists(topK int, lists ...[]core.ScoredEmbedding) []core.ScoredEmbedding {
-	fused := make(map[string]core.ScoredEmbedding)
+//
+// Rows that score the same are ordered by their best rank in the question's
+// own lists, a row none of them holds after those, and then by id.
+func fuseLexicalLists(topK int, lists ...lexicalList) []core.ScoredEmbedding {
+	type fusedRow struct {
+		row     core.ScoredEmbedding
+		score   float64
+		ownRank int // best 1-based rank in an own list; 0 when none holds it
+	}
+	fused := make(map[string]*fusedRow)
 	for _, list := range lists {
-		for rank, result := range list {
-			score := 1 / float64(lexicalFusionK+rank+1)
-			if existing, ok := fused[result.ID]; ok {
-				score += existing.Score
+		weight := lexicalVariantListWeight
+		if list.own {
+			weight = lexicalOwnListWeight
+			if list.share > 0 {
+				weight *= list.share
 			}
-			result.Score = score
-			fused[result.ID] = result
+		}
+		for rank, result := range list.rows {
+			f, ok := fused[result.ID]
+			if !ok {
+				f = &fusedRow{row: result}
+				fused[result.ID] = f
+			}
+			f.score += weight / float64(lexicalFusionK+rank+1)
+			if list.own && (f.ownRank == 0 || rank+1 < f.ownRank) {
+				f.ownRank = rank + 1
+			}
 		}
 	}
-	rows := make([]core.ScoredEmbedding, 0, len(fused))
-	for _, result := range fused {
-		rows = append(rows, result)
+	rows := make([]*fusedRow, 0, len(fused))
+	for _, f := range fused {
+		rows = append(rows, f)
 	}
-	return mergeScoredEmbeddings(topK, rows)
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.score != b.score {
+			return a.score > b.score
+		}
+		if a.ownRank != b.ownRank {
+			return b.ownRank == 0 || (a.ownRank != 0 && a.ownRank < b.ownRank)
+		}
+		return a.row.ID < b.row.ID
+	})
+	if topK > 0 && len(rows) > topK {
+		rows = rows[:topK]
+	}
+	out := make([]core.ScoredEmbedding, len(rows))
+	for i, f := range rows {
+		out[i] = f.row
+		out[i].Score = f.score
+	}
+	return out
 }
 
 // ftsSearchQuery builds the lexical lookup for one query, returning the same columns either way.

@@ -73,17 +73,13 @@ func (t *GraphRAGToolbox) searchTextCandidates(ctx context.Context, req ToolSear
 	// top_k as SearchTextOnly's expanded path does, and fuses their lists by
 	// rank (see fuseLexicalLists): a list cut at top_k would rank a row by
 	// where the cut fell.
-	phrasings := len(resolution.Plan.AlternateQueries) > 0 || len(resolution.Plan.Keywords) > 0
-	listOpts := searchOpts
-	if phrasings {
-		listOpts.TopK *= 4
-		queries = fusedPhrasings(resolution.Plan.Query, queries)
+	if len(resolution.Plan.AlternateQueries) > 0 || len(resolution.Plan.Keywords) > 0 {
+		return t.searchTextPhrasings(ctx, resolution, searchOpts, fusedPhrasings(resolution.Plan.Query, resolution.Plan.AlternateQueries, queries))
 	}
-	var lists [][]core.ScoredEmbedding
 	merged := make(map[string]core.ScoredEmbedding)
 	var firstErr error
 	for idx, query := range queries {
-		results, err := t.db.SearchTextOnly(ctx, query, listOpts)
+		results, err := t.db.SearchTextOnly(ctx, query, searchOpts)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -91,10 +87,6 @@ func (t *GraphRAGToolbox) searchTextCandidates(ctx context.Context, req ToolSear
 			continue
 		}
 		if len(results) == 0 {
-			continue
-		}
-		if phrasings {
-			lists = append(lists, results)
 			continue
 		}
 
@@ -119,17 +111,10 @@ func (t *GraphRAGToolbox) searchTextCandidates(ctx context.Context, req ToolSear
 		if err != nil {
 			log.Printf("cortexdb: cjk bigram search skipped: %v", err)
 		}
-		lists = append(lists, cjk)
 		for _, result := range cjk {
 			if existing, ok := merged[result.ID]; !ok || result.Score > existing.Score {
 				merged[result.ID] = result
 			}
-		}
-	}
-	if phrasings {
-		merged = make(map[string]core.ScoredEmbedding)
-		for _, result := range fuseLexicalLists(0, lists...) {
-			merged[result.ID] = result
 		}
 	}
 
@@ -150,13 +135,52 @@ func (t *GraphRAGToolbox) searchTextCandidates(ctx context.Context, req ToolSear
 		}
 		return ordered[i].Score > ordered[j].Score
 	})
-	if len(ordered) > searchOpts.TopK {
-		ordered = ordered[:searchOpts.TopK]
+	return t.cutTextCandidates(ctx, ordered, searchOpts.TopK, resolution), nil
+}
+
+// searchTextPhrasings is searchTextCandidates for a search with alternate
+// queries or keywords: every phrasing runs, to four times top_k, and the CJK
+// bigram list of the question joins them as one of its own.
+func (t *GraphRAGToolbox) searchTextPhrasings(ctx context.Context, resolution retrievalPlanResolution, searchOpts TextSearchOptions, phrasings []lexicalPhrasing) ([]core.ScoredEmbedding, error) {
+	listOpts := searchOpts
+	listOpts.TopK *= 4
+	var lists []lexicalList
+	var firstErr error
+	for _, phrasing := range phrasings {
+		results, err := t.db.SearchTextOnly(ctx, phrasing.query, listOpts)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		lists = append(lists, lexicalList{rows: results, own: phrasing.own})
+	}
+	// A CJK sentence is one token to the word index; see lexical_cjk.go.
+	if core.ContainsCJK(resolution.Plan.Query) {
+		cjk, err := t.db.searchTextCJK(ctx, resolution.Plan.Query, searchOpts)
+		if err != nil {
+			log.Printf("cortexdb: cjk bigram search skipped: %v", err)
+		}
+		lists = append(lists, lexicalList{rows: cjk, own: true, share: cjkShareOfQuestion(resolution.Plan.Query)})
+	}
+	ordered := fuseLexicalLists(0, lists...)
+	if len(ordered) == 0 {
+		return nil, firstErr
+	}
+	return t.cutTextCandidates(ctx, ordered, searchOpts.TopK, resolution), nil
+}
+
+// cutTextCandidates cuts the ranked candidates of a text search to topK and
+// applies the plan's filters.
+func (t *GraphRAGToolbox) cutTextCandidates(ctx context.Context, ordered []core.ScoredEmbedding, topK int, resolution retrievalPlanResolution) []core.ScoredEmbedding {
+	if len(ordered) > topK {
+		ordered = ordered[:topK]
 	}
 	// SearchTextOnly has applied the document gate to each phrasing, with
 	// its budget refilled; the plan's filters (document_ids) apply here, as
 	// on main.
-	return t.db.filterScoredEmbeddings(ctx, ordered, resolution.Plan.Filters), nil
+	return t.db.filterScoredEmbeddings(ctx, ordered, resolution.Plan.Filters)
 }
 
 // SearchChunksByEntities finds chunks that are linked to the requested
