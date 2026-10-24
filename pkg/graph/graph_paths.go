@@ -101,6 +101,10 @@ type PathSearchOptions struct {
 	// MaxExpansions caps the edges examined across the whole search. It is
 	// the bound that controls runtime; hitting it sets Truncated. Default 5000.
 	MaxExpansions int `json:"max_expansions,omitempty"`
+	// Admit, when set, is the part of the graph the search may take
+	// (StepFilter): its paths, its expansions and its truncation are all of
+	// that part. Unset, the search takes every stored edge.
+	Admit StepFilter `json:"-"`
 	// IncludeBookkeeping lets paths run through the store's own filing —
 	// chunk and document nodes, has_chunk/mentions/based_on/next edges. Off by
 	// default: two entities mentioned by the same chunk are "connected" through
@@ -176,6 +180,7 @@ func (g *GraphStore) SearchPaths(ctx context.Context, seeds []string, opts PathS
 	open := len(seeds) == 1
 
 	adj := newAdjacencyCache(g, direction)
+	adj.admit = opts.Admit
 	bookkeepingNodes := map[string]bool{}
 	if !opts.IncludeBookkeeping {
 		// Intermediate nodes of a bookkeeping type are skipped; the node
@@ -349,6 +354,12 @@ type ScoredNeighbor struct {
 // continued from depth 1 through a type capped at depth 2, so both states
 // matter.
 func (g *GraphStore) WeightedNeighbors(ctx context.Context, startID string, maxDepth int, direction string, edgeTypes []string, relations RelationPolicies) ([]ScoredNeighbor, error) {
+	return g.weightedNeighbors(ctx, startID, maxDepth, direction, edgeTypes, relations, nil)
+}
+
+// weightedNeighbors is WeightedNeighbors over the part of the graph admit
+// lets the walk take, every stored edge with a nil admit.
+func (g *GraphStore) weightedNeighbors(ctx context.Context, startID string, maxDepth int, direction string, edgeTypes []string, relations RelationPolicies, admit StepFilter) ([]ScoredNeighbor, error) {
 	if maxDepth <= 0 {
 		maxDepth = 1
 	}
@@ -366,6 +377,7 @@ func (g *GraphStore) WeightedNeighbors(ctx context.Context, startID string, maxD
 	best := map[state]value{{startID, 0}: {1, 1}}
 	frontier := []state{{startID, 0}}
 	adj := newAdjacencyCache(g, direction)
+	adj.admit = admit
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
 		nextFrontier := map[state]bool{}
 		for _, st := range frontier {
@@ -433,9 +445,12 @@ func (g *GraphStore) WeightedNeighbors(ctx context.Context, startID string, maxD
 
 // adjacencyCache loads each node's edges once per search. A path search
 // revisits the same node from many partial paths, and each visit was a query.
+// What it caches is what admit lets through, so the filter is asked once per
+// node too.
 type adjacencyCache struct {
 	g         *GraphStore
 	direction string
+	admit     StepFilter
 	byNode    map[string][]*GraphEdge
 }
 
@@ -449,6 +464,9 @@ func (a *adjacencyCache) edges(ctx context.Context, nodeID string) ([]*GraphEdge
 	}
 	edges, err := a.g.GetEdges(ctx, nodeID, a.direction)
 	if err != nil {
+		return nil, err
+	}
+	if edges, err = a.admit.admit(ctx, nodeID, edges); err != nil {
 		return nil, err
 	}
 	// Deterministic order: the store returns rows in insertion order, which

@@ -19,6 +19,28 @@ type TraversalOptions struct {
 	// When set, Neighbors orders its result best score first and applies
 	// Limit after scoring, instead of returning breadth-first order.
 	Relations RelationPolicies `json:"relations,omitempty"`
+	// Admit, when set, is the part of the graph the walk may take
+	// (StepFilter). Unset, the walk takes every stored edge.
+	Admit StepFilter `json:"-"`
+}
+
+// StepFilter is the part of the graph a walk may take: given the node the
+// walk stands on and the edges it read there, it returns the edges the walk
+// may follow, each judged together with the node on its far end. A walk
+// that has one never meets what it leaves out, so a limit, a score, a
+// visited set and a count of expansions are all of the graph it admits,
+// and an answer is the one the stored graph would give if it held only
+// that. The graph package has no notion of who may see what; the caller
+// that does (cortexdb's caller scope) writes the filter. An error stops the
+// walk and is returned by it.
+type StepFilter func(ctx context.Context, from string, edges []*GraphEdge) ([]*GraphEdge, error)
+
+// admit is the filter applied, with every edge kept when there is none.
+func (f StepFilter) admit(ctx context.Context, from string, edges []*GraphEdge) ([]*GraphEdge, error) {
+	if f == nil || len(edges) == 0 {
+		return edges, nil
+	}
+	return f(ctx, from, edges)
 }
 
 // PathResult represents a path in the graph
@@ -71,6 +93,14 @@ func (g *GraphStore) Neighbors(ctx context.Context, nodeID string, opts Traversa
 		if err != nil {
 			return nil, fmt.Errorf("failed to get edges: %w", err)
 		}
+		// The type filter runs first so the step filter judges only edges
+		// the walk would take.
+		if opts.Admit != nil {
+			edges, err = opts.Admit.admit(ctx, current.nodeID, edgesOfTypes(edges, opts.EdgeTypes))
+			if err != nil {
+				return nil, err
+			}
+		}
 
 		for _, edge := range edges {
 			// Filter by edge type if specified
@@ -121,7 +151,7 @@ func (g *GraphStore) ScoredNeighbors(ctx context.Context, nodeID string, opts Tr
 	if opts.MaxDepth <= 0 {
 		opts.MaxDepth = 1
 	}
-	scored, err := g.WeightedNeighbors(ctx, nodeID, opts.MaxDepth, opts.Direction, opts.EdgeTypes, opts.Relations)
+	scored, err := g.weightedNeighbors(ctx, nodeID, opts.MaxDepth, opts.Direction, opts.EdgeTypes, opts.Relations, opts.Admit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get edges: %w", err)
 	}
@@ -154,6 +184,13 @@ func (g *GraphStore) ScoredNeighbors(ctx context.Context, nodeID string, opts Tr
 
 // ShortestPath finds the shortest path between two nodes using BFS
 func (g *GraphStore) ShortestPath(ctx context.Context, fromID, toID string) (*PathResult, error) {
+	return g.ShortestPathAdmitting(ctx, fromID, toID, nil)
+}
+
+// ShortestPathAdmitting is ShortestPath over the part of the graph admit
+// lets the walk take: the shortest path that part holds, or none. With a
+// nil admit it is ShortestPath.
+func (g *GraphStore) ShortestPathAdmitting(ctx context.Context, fromID, toID string, admit StepFilter) (*PathResult, error) {
 	if fromID == toID {
 		node, err := g.GetNode(ctx, fromID)
 		if err != nil {
@@ -232,6 +269,9 @@ func (g *GraphStore) ShortestPath(ctx context.Context, fromID, toID string) (*Pa
 		if err != nil {
 			return nil, err
 		}
+		if edges, err = admit.admit(ctx, current.nodeID, edges); err != nil {
+			return nil, err
+		}
 
 		for _, edge := range edges {
 			if !visited[edge.ToNodeID] {
@@ -253,6 +293,21 @@ func (g *GraphStore) ShortestPath(ctx context.Context, fromID, toID string) (*Pa
 	}
 
 	return nil, fmt.Errorf("no path found from %s to %s", fromID, toID)
+}
+
+// edgesOfTypes is the edges of the given types, all of them when none is
+// named.
+func edgesOfTypes(edges []*GraphEdge, types []string) []*GraphEdge {
+	if len(types) == 0 {
+		return edges
+	}
+	out := make([]*GraphEdge, 0, len(edges))
+	for _, edge := range edges {
+		if contains(types, edge.EdgeType) {
+			out = append(out, edge)
+		}
+	}
+	return out
 }
 
 // Subgraph extracts a subgraph containing specified nodes and their connections
