@@ -358,15 +358,11 @@ func TestTheSweepDeletesOnlyWhatIsStillExpiredWhenItDeletes(t *testing.T) {
 	if _, err := db.SQL().Exec(`DROP TRIGGER keep_memories`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE messages RENAME COLUMN role TO role_hidden`); err != nil {
-		t.Fatal(err)
-	}
+	restore := renameColumn(t, db, "messages", "role", "role_hidden")
 	if _, err := db.sweepMemory(ctx, "m-renewed", now); err == nil {
 		t.Fatal("an unreadable memory was swept without an error")
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE messages RENAME COLUMN role_hidden TO role`); err != nil {
-		t.Fatal(err)
-	}
+	restore()
 
 	// A delete the store refuses is reported, and nothing is removed.
 	if _, err := db.UpdateKnowledge(ctx, KnowledgeUpdateRequest{KnowledgeID: "d", ExpiresAt: strPtr(pastInstant())}); err != nil {

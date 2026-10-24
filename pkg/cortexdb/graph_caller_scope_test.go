@@ -248,17 +248,13 @@ func TestUnderACallerScopeAGraphWalkLeavesOutAnotherUsersMemory(t *testing.T) {
 func TestUnderACallerScopeAnUnreadableMemoryIsHidden(t *testing.T) {
 	db := scopedGraphBrain(t)
 	ctx := WithCallerScope(context.Background(), CallerScope{Key: "hermes", Memory: func(MemoryBucket) bool { return true }})
-	if _, err := db.SQL().Exec(`ALTER TABLE messages RENAME COLUMN role TO role_hidden`); err != nil {
-		t.Fatal(err)
-	}
+	restore := renameColumn(t, db, "messages", "role", "role_hidden")
 	out, err := db.GraphRAGTools().ExpandGraph(ctx, ToolExpandGraphRequest{NodeIDs: []string{EntityNodeID("Kestrel Vale")}})
 	answer := answerOf(t, out, err)
 	if strings.Contains(answer, "delivers on Tuesdays") || strings.Contains(answer, "owes me money") {
 		t.Fatalf("expand_graph served a memory it could not check against the scope: %s", answer)
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE messages RENAME COLUMN role_hidden TO role`); err != nil {
-		t.Fatal(err)
-	}
+	restore()
 }
 
 // An edge only beta backs is left out under alpha's scope, and so is every
@@ -297,9 +293,7 @@ func TestUnderACallerScopeAnEdgeOnlyAnotherCollectionBacksIsLeftOut(t *testing.T
 func TestUnderACallerScopeAnUnreadableCollectionHidesTheDocument(t *testing.T) {
 	db := scopedGraphBrain(t)
 	ctx := WithCallerScope(context.Background(), alphaScope())
-	if _, err := db.SQL().Exec(`ALTER TABLE collections RENAME COLUMN name TO name_hidden`); err != nil {
-		t.Fatal(err)
-	}
+	restore := renameColumn(t, db, "collections", "name", "name_hidden")
 	req := ToolGetNodesRequest{NodeIDs: []string{graphChunkNodeID("a1", 0), graphChunkNodeID("b1", 0)}}
 	out, err := db.GraphRAGTools().GetNodes(ctx, req)
 	if err != nil {
@@ -315,9 +309,7 @@ func TestUnderACallerScopeAnUnreadableCollectionHidesTheDocument(t *testing.T) {
 	if len(open.Nodes) != 2 {
 		t.Fatalf("without a scope get_nodes served %d chunk nodes, want 2", len(open.Nodes))
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE collections RENAME COLUMN name_hidden TO name`); err != nil {
-		t.Fatal(err)
-	}
+	restore()
 }
 
 // The scope adds to the expiry, it does not replace it: an expired document
@@ -343,9 +335,7 @@ func TestUnderACallerScopeAnExpiredDocumentOfTheCallersCollectionStaysHidden(t *
 // and alpha's own is served.
 func TestUnderACallerScopeAnUnreadableExpiryStillHidesAnotherCollection(t *testing.T) {
 	db := scopedGraphBrain(t)
-	if _, err := db.SQL().Exec(`ALTER TABLE documents RENAME COLUMN metadata TO metadata_hidden`); err != nil {
-		t.Fatal(err)
-	}
+	restore := renameColumn(t, db, "documents", "metadata", "metadata_hidden")
 	ctx := WithCallerScope(context.Background(), alphaScope())
 	out, err := db.GraphRAGTools().GetNodes(ctx, ToolGetNodesRequest{NodeIDs: []string{graphChunkNodeID("a1", 0), graphChunkNodeID("b1", 0)}})
 	if err != nil {
@@ -354,9 +344,7 @@ func TestUnderACallerScopeAnUnreadableExpiryStillHidesAnotherCollection(t *testi
 	if len(out.Nodes) != 1 || out.Nodes[0].ID != graphChunkNodeID("a1", 0) {
 		t.Fatalf("get_nodes under alpha's scope, expiry unreadable, served %d nodes, want a1's chunk alone: %+v", len(out.Nodes), out.Nodes)
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE documents RENAME COLUMN metadata_hidden TO metadata`); err != nil {
-		t.Fatal(err)
-	}
+	restore()
 }
 
 // When the chunk nodes an edge cites cannot be read, a caller under a
@@ -369,14 +357,7 @@ func TestUnderACallerScopeUnreadableProvenanceHidesTheEdge(t *testing.T) {
 		{ID: "e-beta", FromNodeID: EntityNodeID("Kestrel Vale"), ToNodeID: EntityNodeID("Project Nightjar"), EdgeType: "funds", Properties: map[string]any{"chunk_ids": []string{graphChunkNodeID("b1", 0)}}},
 		{ID: "e-both", FromNodeID: EntityNodeID("Kestrel Vale"), ToNodeID: EntityNodeID("Alpha Mill"), EdgeType: "supplies", Properties: map[string]any{"chunk_ids": []string{graphChunkNodeID("a1", 0), graphChunkNodeID("b1", 0)}}},
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE graph_nodes RENAME COLUMN content TO content_hidden`); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, err := db.SQL().Exec(`ALTER TABLE graph_nodes RENAME COLUMN content_hidden TO content`); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	defer renameColumn(t, db, "graph_nodes", "content", "content_hidden")()
 	// A knowledge rule alone: the outage branch keys on that rule.
 	knowledgeOnly := WithCallerScope(context.Background(), CallerScope{Key: "alpha-key", Knowledge: func(c string) bool { return c == "alpha" }})
 	if got := db.withoutExpiredProvenance(knowledgeOnly, edges); len(got) != 0 {
@@ -397,14 +378,7 @@ func TestUnderACallerScopeAMemoryWhoseBucketCannotBeReadIsHidden(t *testing.T) {
 	if out, err := db.GraphRAGTools().GetNodes(ctx, req); err != nil || len(out.Nodes) != 1 {
 		t.Fatalf("with its bucket readable, get_nodes serves %+v, %v, want Hermes's memory", out, err)
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE sessions RENAME COLUMN updated_at TO updated_at_hidden`); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, err := db.SQL().Exec(`ALTER TABLE sessions RENAME COLUMN updated_at_hidden TO updated_at`); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	defer renameColumn(t, db, "sessions", "updated_at", "updated_at_hidden")()
 	out, err := db.GraphRAGTools().GetNodes(ctx, req)
 	if err != nil {
 		t.Fatal(err)
@@ -547,15 +521,11 @@ func TestSearchChunksByEntitiesReportsAStoreItCannotRead(t *testing.T) {
 	db := scopedGraphBrain(t)
 	req := ToolSearchChunksByEntitiesRequest{EntityNames: []string{"Kestrel Vale"}, TopK: 1}
 	for _, broken := range []struct{ table, column string }{{"graph_edges", "edge_type"}, {"embeddings", "content"}} {
-		if _, err := db.SQL().Exec(`ALTER TABLE ` + broken.table + ` RENAME COLUMN ` + broken.column + ` TO hidden_column`); err != nil {
-			t.Fatal(err)
-		}
+		restore := renameColumn(t, db, broken.table, broken.column, "hidden_column")
 		if out, err := db.GraphRAGTools().SearchChunksByEntities(context.Background(), req); err == nil {
 			t.Errorf("with %s.%s unreadable the tool answers %+v and no error", broken.table, broken.column, out)
 		}
-		if _, err := db.SQL().Exec(`ALTER TABLE ` + broken.table + ` RENAME COLUMN hidden_column TO ` + broken.column); err != nil {
-			t.Fatal(err)
-		}
+		restore()
 	}
 }
 

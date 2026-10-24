@@ -322,15 +322,11 @@ func TestASweepStopsAtTheFirstFailure(t *testing.T) {
 	// has passed there, and nothing waits.
 	later := time.Now().Add(2 * time.Second)
 
-	if _, err := db.SQL().Exec(`ALTER TABLE messages RENAME COLUMN metadata TO metadata_hidden`); err != nil {
-		t.Fatal(err)
-	}
+	restore := renameColumn(t, db, "messages", "metadata", "metadata_hidden")
 	if report, err := db.SweepExpired(c, later, true); err == nil || report != nil || !strings.Contains(err.Error(), "list memory expiries") {
 		t.Fatalf("an unreadable memory table: %+v, %v", report, err)
 	}
-	if _, err := db.SQL().Exec(`ALTER TABLE messages RENAME COLUMN metadata_hidden TO metadata`); err != nil {
-		t.Fatal(err)
-	}
+	restore()
 
 	block := func(table string) {
 		if _, err := db.SQL().Exec(`CREATE TRIGGER block_` + table + ` BEFORE DELETE ON ` + table + ` BEGIN SELECT RAISE(ABORT, 'blocked'); END`); err != nil {
