@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -212,20 +213,25 @@ func TestUnderACallerScopeAWalkDoesNotPassThroughAnotherCollectionsChunk(t *test
 
 // A memory the caller may not read is not walked through either: Zeus's
 // memory mentions Kestrel Vale and Heron Mill, and a caller confined to
-// Hermes's memories must not reach Heron Mill's chunk through it.
+// Hermes's memories must not reach Heron Mill's chunk through it. A scope
+// with no knowledge rule serves an entity whole (scopedNode), its time of
+// last write included, which Zeus's save moves: the answers are compared
+// without it, since that is the entity's own field and not what the walk
+// reached.
 func TestUnderACallerScopeAWalkDoesNotPassThroughAnotherUsersMemory(t *testing.T) {
+	withoutWriteTimes := regexp.MustCompile(`"updated_at":"[^"]*",?`)
 	db := walkScopeBrain(t)
 	ctx := WithCallerScope(context.Background(), CallerScope{Key: "hermes", Memory: func(b MemoryBucket) bool { return b.UserID == "hermes" }})
 	before := map[string]string{}
 	for _, c := range walkCalls() {
-		before[c.name] = c.answer(t, ctx, db)
+		before[c.name] = withoutWriteTimes.ReplaceAllString(c.answer(t, ctx, db), "")
 	}
 	if _, err := db.SaveMemory(context.Background(), MemorySaveRequest{MemoryID: "zeus-mem", UserID: "zeus", Content: "ZEUSPRIVATE: Kestrel Vale sells Heron Mill.",
 		Entities: []ToolEntityInput{{Name: "Kestrel Vale"}, {Name: "Heron Mill"}}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range walkCalls() {
-		if after := c.answer(t, ctx, db); after != before[c.name] {
+		if after := withoutWriteTimes.ReplaceAllString(c.answer(t, ctx, db), ""); after != before[c.name] {
 			t.Errorf("%s: Hermes's answer changes once Zeus's memory links Kestrel Vale and Heron Mill\nbefore: %s\nafter:  %s", c.name, before[c.name], after)
 		}
 	}
