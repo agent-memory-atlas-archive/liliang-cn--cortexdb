@@ -25,16 +25,20 @@ import (
 // memory_get, memory_list_all, knowledge_memory_promote_to_knowledge,
 // extract_conversation's session_id, and the bucket and supersedes of a save
 // (memory_save, knowledge_memory_remember); and on the collection of
-// knowledge_search, recall's knowledge half included. It does not hold on a
-// call that names one row by id (the single forms of memory_get and
+// knowledge_search, recall's knowledge half included; and on the graph tools
+// (expand_graph, get_nodes, knowledge_memory_neighbors,
+// knowledge_memory_shortest_path, knowledge_memory_expand_entity_context,
+// search_paths, search_chunks_by_entities), which serve only the nodes and
+// edges the scope reaches (withoutExpiredDocuments, servedSeeds). It does not
+// hold on a call that names one row by id (the single forms of memory_get and
 // knowledge_get, memory_update, memory_delete, knowledge_update,
 // knowledge_delete), which the ports' row guard checks; on DB.ListAllMemories,
 // the unpaged listing across all scopes that export and the maintenance
-// passes read; on the chunk readers (cortex_query, search_text, get_chunks,
-// knowledge_memory_expand_entity_context), which read chunks of any
-// collection; nor on the graph tools, whose nodes and edges carry no scope.
-// For a confined key the ports cover these: they refuse the tool, force its
-// collection or check the row (authz's allowlist).
+// passes read; on changes_since, which lists every change, other users'
+// memories included; nor on the chunk readers (cortex_query, search_text,
+// get_chunks), which read chunks of any collection. For a confined key the
+// ports cover these: they refuse the tool, force its collection or check the
+// row (authz's allowlist).
 type CallerScope struct {
 	// Key names the caller. Identical searches that arrive together share
 	// one run (memory_search_coalesce.go), and two callers with different
