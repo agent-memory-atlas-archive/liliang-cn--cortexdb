@@ -30,9 +30,9 @@ import (
 // knowledge_memory_shortest_path, knowledge_memory_expand_entity_context,
 // search_paths, search_chunks_by_entities), which walk and serve only the
 // nodes and edges the scope reaches (walkAdmit, withoutExpiredDocuments,
-// servedSeeds). It does not
-// hold on a call that names one row by id (the single forms of memory_get and
-// knowledge_get, memory_update, memory_delete, knowledge_update,
+// servedSeeds). It does not hold on a call that names one row by id (the
+// single forms of memory_get and knowledge_get, memory_update, memory_delete,
+// knowledge_update,
 // knowledge_delete), which the ports' row guard checks; on DB.ListAllMemories,
 // the unpaged listing across all scopes that export and the maintenance
 // passes read; on changes_since, which lists every change, other users'
