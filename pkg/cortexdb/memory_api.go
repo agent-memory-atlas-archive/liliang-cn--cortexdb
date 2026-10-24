@@ -241,7 +241,8 @@ func (db *DB) UpdateMemory(ctx context.Context, req MemoryUpdateRequest) (*Memor
 
 // GetMemory fetches a memory record by ID.
 //
-// The list form lists a row the caller's scope does not reach under missing,
+// The list form takes at most MaxListedIDs ids and answers each distinct id
+// once (listedIDs). It lists a row the caller's scope does not reach under missing,
 // in the order asked, exactly as a row that does not exist: a confined
 // caller cannot tell the two apart. The single form stays unconfined on
 // purpose: the row guard of the ports (authz.Scope.GuardToolRows) reads
@@ -249,8 +250,12 @@ func (db *DB) UpdateMemory(ctx context.Context, req MemoryUpdateRequest) (*Memor
 // row there would hand the guard a row that does not exist.
 func (db *DB) GetMemory(ctx context.Context, req MemoryGetRequest) (*MemoryGetResponse, error) {
 	if len(req.MemoryIDs) > 0 {
+		ids, err := listedIDs(req.MemoryIDs)
+		if err != nil {
+			return nil, err
+		}
 		resp := &MemoryGetResponse{}
-		for _, id := range req.MemoryIDs {
+		for _, id := range ids {
 			row, err := db.loadMemoryRow(ctx, id)
 			if errors.Is(err, core.ErrNotFound) {
 				resp.Missing = append(resp.Missing, id)

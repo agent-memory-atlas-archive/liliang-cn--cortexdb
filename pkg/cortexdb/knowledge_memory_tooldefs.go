@@ -56,7 +56,7 @@ func KnowledgeMemoryToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "knowledge_get",
-			Description: "Fetch one durable knowledge item by ID, or several at once with knowledge_ids (in the order given; ids that name no document the caller may read are listed in missing).",
+			Description: "Fetch one durable knowledge item by ID, or several at once with knowledge_ids (at most 100, in the order given, each once; ids that name no document the caller may read are listed in missing).",
 			InputSchema: toolObjectSchema(
 				nil,
 				map[string]any{
@@ -335,7 +335,7 @@ func KnowledgeMemoryToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "memory_get",
-			Description: "Fetch a memory by ID, or several at once with memory_ids (in the order given; ids that do not exist are listed in missing).",
+			Description: "Fetch a memory by ID, or several at once with memory_ids (at most 100, in the order given, each once; ids that do not exist are listed in missing).",
 			InputSchema: toolObjectSchema(
 				nil,
 				map[string]any{
