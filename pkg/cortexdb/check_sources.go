@@ -248,8 +248,10 @@ func formOf(folded string) checkForm {
 }
 
 // holds reports whether the source contains a form. A form that holds a
-// digit is found only whole, as a token of the source; any other is found
-// inside a longer word. A lookup reads its form a bounded number of times.
+// digit is found only whole, as a token of the source; any other is found as
+// a word of the source, or as the start of one with at most maxWordTail
+// letters after it (wordAt). A lookup reads its form a bounded number of
+// times.
 func (s *checkSource) holds(form checkForm) bool {
 	s.scanned += len(form.text)
 	if form.digit {
@@ -257,10 +259,48 @@ func (s *checkSource) holds(form checkForm) bool {
 	}
 	found, seen := s.words[form.text]
 	if !seen {
-		found = len(s.index.Lookup([]byte(form.text), 1)) > 0
+		for _, at := range s.index.Lookup([]byte(form.text), -1) {
+			if wordAt(s.text, at, len(form.text)) {
+				found = true
+				break
+			}
+		}
 		s.words[form.text] = found
 	}
 	return found
+}
+
+// maxWordTail is how many letters a word of the source may run on past a
+// form and still hold it: a plural or a case ending (APIs for API, Zürichs
+// for Zürich), not another word that starts the same way (metadata for
+// Meta).
+const maxWordTail = 2
+
+// wordAt reports whether the form at text[at:at+n] is a word of the text: it
+// starts a word, and the word it starts ends within maxWordTail letters of
+// it. Found anywhere inside a word, a short name held where it was never
+// written: US in music. An end of the form that is not a letter or a digit
+// is not checked, and a Han, kana or hangul neighbour does not continue a
+// word (isWordRune): those scripts run into Latin text unspaced.
+func wordAt(text string, at, n int) bool {
+	form := text[at : at+n]
+	if first, _ := utf8.DecodeRuneInString(form); isWordRune(first) {
+		if before, _ := utf8.DecodeLastRuneInString(text[:at]); isWordRune(before) {
+			return false
+		}
+	}
+	if last, _ := utf8.DecodeLastRuneInString(form); isWordRune(last) {
+		tail := 0
+		for _, r := range text[at+n:] {
+			if !isWordRune(r) {
+				break
+			}
+			if tail++; tail > maxWordTail {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // checkBudget is what a call may still look up: a number of lookups, and

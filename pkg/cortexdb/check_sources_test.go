@@ -1075,3 +1075,23 @@ func btoi(b bool) int {
 	}
 	return 0
 }
+
+// A marked word is found as a word of the source, or as the start of one that
+// runs on for a plural or a case ending, never inside another word: US is
+// not in music, nor Meta in metadata.
+func TestAWordIsFoundAsAWordNotInsideAnother(t *testing.T) {
+	cases := []struct {
+		sentence, source string
+		missing          []string
+	}{
+		{"The US version supports 12 instruments.", "This music model supports 12 instruments.", []string{"US"}},
+		{"It was Meta that released it.", "The metadata says it was released.", []string{"Meta"}},
+		{"The API is documented.", "All APIs are documented.", nil},
+		{"Spoken in Zürich.", "Die Zürichs Sprache.", nil},
+		{"Built by OpenAI.", "Built by OpenAI's team.", nil},
+		{"Built by OpenAI.", "Built by NotOpenAI.", []string{"OpenAI"}},
+	}
+	for _, c := range cases {
+		sameFacts(t, c.sentence+" ← "+c.source, missingFrom(c.sentence, []string{c.source}, nil), c.missing)
+	}
+}
