@@ -81,7 +81,7 @@ func TestEverySpellingOfAnUpsertIDIsGuarded(t *testing.T) {
 	wantStatus(t, srv, http.MethodPost, "/v1/knowledge", "notes-secret",
 		`{"KNOWLEDGE_ID":"secret-doc","collection":"notes","content":"overwritten"}`, http.StatusNotFound)
 	wantStatus(t, srv, http.MethodPost, "/v1/knowledge", "notes-secret",
-		`{"knowledge_id":"n-1","Knowledge_Id":"secret-doc","collection":"notes","content":"overwritten"}`, http.StatusNotFound)
+		`{"knowledge_id":"n-1","Knowledge_Id":"secret-doc","collection":"notes","content":"overwritten"}`, http.StatusBadRequest)
 	if _, body := do(t, srv, http.MethodGet, "/v1/knowledge?knowledge_id=secret-doc", "op-secret", ""); !strings.Contains(string(body), "The secret retainer.") {
 		t.Errorf("the document changed: %s", body)
 	}
@@ -189,14 +189,20 @@ func TestASupersedeTargetOutsideTheKeysScopeIsNotFoundOverHTTP(t *testing.T) {
 		{"missing", "hermes-3", `{"memory_id":"hermes-3","user_id":"hermes","scope":"user","content":"x","supersedes":["no-such"]}`},
 		{"foreign, other spelling", "hermes-4", `{"memory_id":"hermes-4","user_id":"hermes","scope":"user","content":"x","SUPERSEDES":["zeus-1"]}`},
 		{"foreign after its own", "hermes-5", `{"memory_id":"hermes-5","user_id":"hermes","scope":"user","content":"x","supersedes":["hermes-1"," zeus-1 "]}`},
-		// The id the handler keeps is the last spelling: hermes-7 is not the
-		// new memory, so it is a target, and a missing one.
-		{"another spelling's id as a target", "hermes-8", `{"Memory_Id":"hermes-7","memory_id":"hermes-8","user_id":"hermes","scope":"user","content":"x","supersedes":["hermes-7"]}`},
 	} {
 		msg := wantStatus(t, srv, http.MethodPost, "/v1/memory", "hermes-secret", c.body, http.StatusNotFound)
 		answers[c.name] = strings.NewReplacer("zeus-1", "<id>", "no-such", "<id>", "hermes-7", "<id>").Replace(msg)
 		if st, _ := do(t, srv, http.MethodGet, "/v1/memory?memory_id="+c.id, "op-secret", ""); st != http.StatusNotFound {
 			t.Errorf("%s: the new memory was written although its target was refused (%d)", c.name, st)
+		}
+	}
+	// Two spellings of the new memory's id are refused before the target is
+	// looked at, so neither id is written.
+	wantStatus(t, srv, http.MethodPost, "/v1/memory", "hermes-secret",
+		`{"Memory_Id":"hermes-7","memory_id":"hermes-8","user_id":"hermes","scope":"user","content":"x","supersedes":["hermes-7"]}`, http.StatusBadRequest)
+	for _, id := range []string{"hermes-7", "hermes-8"} {
+		if st, _ := do(t, srv, http.MethodGet, "/v1/memory?memory_id="+id, "op-secret", ""); st != http.StatusNotFound {
+			t.Errorf("%s was written from a body that names its id twice (%d)", id, st)
 		}
 	}
 	if want := `supersede "<id>": not found`; answers["missing"] != want {

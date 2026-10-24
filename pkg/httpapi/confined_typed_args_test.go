@@ -42,9 +42,6 @@ func TestATypedWriteTakesWhatTheAllowlistLineOfItsToolTakes(t *testing.T) {
 		{"notes-secret", "/v1/knowledge", `{"knowledge_id":"n1","collection":"notes","content":"x","METADATA":{"_scope":"global"}}`, "metadata._scope"},
 		{"hermes-secret", "/v1/memory", `{"memory_id":"h1","user_id":"hermes","scope":"user","content":"x","entitieſ":[{"name":"Project Nightshade","description":"defaced"}]}`, "entities"},
 		{"hermes-secret", "/v1/memory", `{"memory_id":"h1","user_id":"hermes","scope":"user","content":"x","Relationſ":[{"from":"Project Nightshade","to":"Orpheus","type":"funds"}]}`, "relations"},
-		// The decoder keeps the last of two spellings, so an empty one after
-		// the key's collection leaves the write in no collection of the key.
-		{"notes-secret", "/v1/knowledge", `{"knowledge_id":"n1","collection":"notes","Collection":"","content":"x"}`, "leaves collection unset"},
 	} {
 		status, payload := do(t, srv, http.MethodPost, c.path, c.secret, c.body)
 		if status != http.StatusForbidden || !strings.Contains(errorMessage(t, payload), c.want) {
@@ -54,6 +51,10 @@ func TestATypedWriteTakesWhatTheAllowlistLineOfItsToolTakes(t *testing.T) {
 			t.Errorf("%s: the operator was held to the allowlist: %s", c.path, payload)
 		}
 	}
+	// Two spellings of the collection, an empty one after the key's, are
+	// refused before any policy reads them (authz.CheckUnambiguous).
+	wantStatus(t, srv, http.MethodPost, "/v1/knowledge", "notes-secret",
+		`{"knowledge_id":"n1","collection":"notes","Collection":"","content":"x"}`, http.StatusBadRequest)
 	for _, c := range []struct{ secret, path, body string }{
 		{"notes-secret", "/v1/knowledge", `{"knowledge_id":"n2","collection":"notes","content":"Orpheus plays.","metadata":{"color":"blue"}}`},
 		{"hermes-secret", "/v1/memory", `{"memory_id":"h2","user_id":"hermes","scope":"user","content":"Hermes tunes the lyre.","metadata":{"document_id":"a note of mine"}}`},
