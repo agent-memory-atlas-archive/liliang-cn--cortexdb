@@ -1,6 +1,8 @@
 package cortexdb
 
 import (
+	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -18,9 +20,11 @@ import (
 // entities the searched collection knows (entityKnownIn).
 //
 // The list is a union that grows with every ingest; delete_document_graph
-// detaches the entity from the document but does not shrink the list. An
-// entity with no list — written before this property existed, or by a tool
-// that has no collection such as upsert_entities — is known everywhere.
+// detaches the entity from the document but does not shrink the list.
+// upsert_entities has no collection of its own: it adds the collections of
+// the stored chunks it names (mergeMentionCollections). An entity with no
+// list — written before this property existed, or by upsert_entities with
+// no stored chunk — is known everywhere.
 // A caller scope reads the same list (scopedNode), and is stricter: there an
 // entity with no list is known nowhere.
 
@@ -44,6 +48,62 @@ func mergeEntityCollections(nodes []*graph.GraphNode, prior map[string]*graph.Gr
 		}
 		node.Properties[entityCollectionsKey] = unionStrings(before, []string{collection})
 	}
+}
+
+// mergeMentionCollections adds to each node's list the collections of the
+// chunks that mention it, keeping what prior writes recorded. edges are the
+// mention edges of the write, from chunk to entity, and chunkCollections the
+// collection of each stored chunk among them. A chunk with no known
+// collection adds nothing, and a node no such chunk mentions keeps its
+// properties as they are. The list starts from the stored one, not from the
+// node: a caller metadata key "collections", which can only be a string, is
+// dropped when the write names a stored chunk.
+func mergeMentionCollections(nodes []*graph.GraphNode, prior map[string]*graph.GraphNode, edges []*graph.GraphEdge, chunkCollections map[string]string) {
+	found := make(map[string][]string)
+	for _, edge := range edges {
+		if collection := chunkCollections[edge.FromNodeID]; collection != "" {
+			found[edge.ToNodeID] = unionStrings(found[edge.ToNodeID], []string{collection})
+		}
+	}
+	for _, node := range nodes {
+		if len(found[node.ID]) == 0 {
+			continue
+		}
+		var before []string
+		if was, ok := prior[node.ID]; ok {
+			before = toStringSlice(was.Properties[entityCollectionsKey])
+		}
+		node.Properties[entityCollectionsKey] = unionStrings(before, found[node.ID])
+	}
+}
+
+// mentionChunkCollections reads the collection of each stored chunk the
+// edges start from, on embeddings.collection_id. A chunk the store does not
+// hold, such as a stub, is not in the map.
+func (db *DB) mentionChunkCollections(ctx context.Context, edges []*graph.GraphEdge) (map[string]string, error) {
+	ids := make([]string, 0, len(edges))
+	for _, edge := range edges {
+		ids = append(ids, edge.FromNodeID)
+	}
+	out := make(map[string]string, len(ids))
+	for _, batch := range stringChunks(ids, 1) {
+		placeholders, args := sqlPlaceholders(batch)
+		rows, err := db.query(ctx, `SELECT e.id, c.name FROM embeddings e
+			JOIN collections c ON c.id = e.collection_id
+			WHERE e.id IN (`+placeholders+`)`, args...)
+		if err == nil {
+			err = eachRow(rows, func() error {
+				var id, name string
+				err := rows.Scan(&id, &name)
+				out[id] = name
+				return err
+			})
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load mention chunk collections: %w", err)
+		}
+	}
+	return out, nil
 }
 
 // entityKnownIn reports whether an entity with these collections may be
