@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.139.1] - 2026-10-27
+
+### Security
+
+- `POST /v1/graph/sparql` is a write unless the executor's parser says the
+  query does not mutate, as the tool route and gRPC `QuerySparql` already
+  were. It was classified as a read for every query, so a read-only key
+  could store or delete triples with `INSERT DATA` / `DELETE DATA`.
+  Reported privately by Lauro Foletti.
+
+### Changed
+
+- `upsert_entities` records the collections of the stored chunks it names
+  on each entity, in union with the stored list, so a caller confined to one
+  of them is served the entity (#105). Lauro Foletti.
+
 ## [2.139.0] - 2026-10-24
 
 ### Security
