@@ -143,6 +143,15 @@ func authorizeWith(db *cortexdb.DB) func(rr route, next http.HandlerFunc) http.H
 					}
 				}
 			}
+			// The SPARQL route is a write in the table; a query the executor's
+			// parser says does not mutate is a read. It can only narrow: a
+			// body that will not parse, or no database to parse it with,
+			// leaves the write.
+			if rr == sparqlRoute && m.Access == authz.Write && db != nil {
+				if q, ok := peekJSONString(w, r, "query"); ok && !db.Graph().SPARQLMutates(r.Context(), q) {
+					m.Access = authz.Read
+				}
+			}
 			if err := key.AuthorizeOperation(name, m); err != nil {
 				writeError(w, http.StatusForbidden, err.Error())
 				return
@@ -301,6 +310,9 @@ func typedToolArgs(args, meta map[string]any, entities, relations int) []byte {
 
 // sparqlToolName is the one tool whose classification is decided per call.
 const sparqlToolName = "knowledge_graph_query"
+
+// sparqlRoute is the one route whose classification is decided per call.
+var sparqlRoute = route{http.MethodPost, "/v1/graph/sparql"}
 
 // peekJSONString reads one top-level string out of the body and puts the body
 // back, so the handler still sees it. A body that will not parse yields no

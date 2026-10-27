@@ -65,13 +65,16 @@ var routeAccess = map[route]authz.Method{
 	{http.MethodPost, "/v1/query"}:  {Access: authz.Read},
 	{http.MethodPost, "/v1/recall"}: {Access: authz.Read},
 
-	// Graph. Upserts write; expansion and SPARQL only read what is stored,
-	// matching UpsertKnowledgeGraph and QuerySparql on the gRPC side.
+	// Graph. Upserts write; expansion only reads what is stored. SPARQL is a
+	// write, because the subset executes updates (INSERT DATA, DELETE
+	// DATA), and is narrowed to a read per call when the executor's own
+	// parser says the query does not mutate (authorizeWith), as QuerySparql
+	// is on the gRPC side and knowledge_graph_query on the tool route.
 	{http.MethodPost, "/v1/graph/entities"}:  {Access: authz.Write},
 	{http.MethodPost, "/v1/graph/relations"}: {Access: authz.Write},
 	{http.MethodPost, "/v1/graph/expand"}:    {Access: authz.Read},
 	{http.MethodPost, "/v1/graph/triples"}:   {Access: authz.Write},
-	{http.MethodPost, "/v1/graph/sparql"}:    {Access: authz.Read},
+	{http.MethodPost, "/v1/graph/sparql"}:    {Access: authz.Write},
 
 	// Tools. The listing is a static catalogue and touches no row.
 	//
