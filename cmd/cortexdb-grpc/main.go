@@ -11,7 +11,11 @@
 //	CORTEXDB_EMBED_DIM   embedding dimension (default 1536)
 //	CORTEXDB_KEY_FILE    JSON file of scoped API keys (replaces the single token)
 //	CORTEXDB_BACKUP_DIR  where AdminService.Backup may write
-//	CORTEXDB_HTTP_ADDR   also serve REST + /metrics + /debug/vars here
+//	CORTEXDB_HTTP_ADDR   also serve REST + /metrics + /healthz + /debug/vars here
+//	CORTEXDB_EMBED_PROBE_SECONDS  probe the embedder this often (default 60, 0 off)
+//	CORTEXDB_RECALL_LOG  1 keeps a log of recalls (queries included; off by default)
+//	CORTEXDB_LOG_FORMAT  text (logfmt, default) or json
+//	CORTEXDB_LOG_LEVEL   debug, info (default), warn or error
 //
 // `cortexdb-grpc -health` probes a server already running at -addr instead of
 // starting one, so the same binary is its own liveness check. See deploy/ for
@@ -37,6 +41,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"google.golang.org/grpc"
@@ -63,6 +68,7 @@ func main() {
 		return
 	}
 	_ = godotenv.Load()
+	observability.SetupLogsFromEnv()
 
 	var (
 		dbPath = flag.String("db", envOr("CORTEXDB_PATH", cortexdb.DefaultDBPath()), "SQLite database path")
@@ -94,6 +100,14 @@ func main() {
 		return
 	}
 
+	// Metrics wrap authorization rather than sitting inside it, so a denied
+	// call is counted too — on a server whose point is scoped keys, denials
+	// are the signal an operator most needs.
+	metrics := observability.NewRegistry()
+	if err := metrics.PublishExpvar("cortexdb"); err != nil {
+		log.Fatalf("publish expvar: %v", err)
+	}
+
 	var opts []cortexdb.Option
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
 		model := envOr("CORTEXDB_EMBED_MODEL", "text-embedding-3-small")
@@ -101,7 +115,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("invalid CORTEXDB_EMBED_DIM: %v", err)
 		}
-		opts = append(opts, cortexdb.WithEmbedder(newOpenAIEmbedder(baseURL, os.Getenv("OPENAI_API_KEY"), model, dim)))
+		opts = append(opts, cortexdb.WithEmbedder(newMeteredEmbedder(newOpenAIEmbedder(baseURL, os.Getenv("OPENAI_API_KEY"), model, dim), metrics)))
 		log.Printf("embedder: %s (dim=%d) via %s", model, dim, baseURL)
 	} else {
 		log.Printf("embedder: none (lexical mode)")
@@ -124,6 +138,14 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	opts = append(opts, floors...)
+	recallLog, err := cortexdb.RecallLogOptionsFromEnv()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if len(recallLog) > 0 {
+		log.Printf("recall log: on (CORTEXDB_RECALL_LOG); queries are stored for CORTEXDB_RECALL_LOG_DAYS")
+	}
+	opts = append(opts, recallLog...)
 
 	db, err := cortexdb.Open(cortexdb.DefaultConfig(*dbPath), opts...)
 	if err != nil {
@@ -134,14 +156,6 @@ func main() {
 			log.Printf("close cortexdb: %v", err)
 		}
 	}()
-
-	// Metrics wrap authorization rather than sitting inside it, so a denied
-	// call is counted too — on a server whose point is scoped keys, denials
-	// are the signal an operator most needs.
-	metrics := observability.NewRegistry()
-	if err := metrics.PublishExpvar("cortexdb"); err != nil {
-		log.Fatalf("publish expvar: %v", err)
-	}
 
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -171,6 +185,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if db.HasEmbedder() {
+		if every := envSeconds("CORTEXDB_EMBED_PROBE_SECONDS", 60); every > 0 {
+			go probeEmbedderEvery(ctx, db, metrics, every, 10*time.Second)
+		}
+	}
 	go func() {
 		<-ctx.Done()
 		srv.GracefulStop()
@@ -211,12 +230,22 @@ func startHTTP(addr string, db *cortexdb.DB, metrics *observability.Registry, to
 	mux.Handle("/v1/", handler)
 	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/debug/vars", expvar.Handler())
+	mux.Handle("/healthz", healthHandler(db, dbPath))
 	go func() {
-		log.Printf("http listening on %s (REST /v1, metrics /metrics, expvar /debug/vars)", addr)
+		log.Printf("http listening on %s (REST /v1, metrics /metrics, health /healthz, expvar /debug/vars)", addr)
 		if err := http.ListenAndServe(addr, mux); err != nil {
 			log.Fatalf("http serve: %v", err)
 		}
 	}()
+}
+
+// envSeconds reads a whole number of seconds; 0 turns the thing off.
+func envSeconds(key string, fallback int) time.Duration {
+	n, err := strconv.Atoi(envOr(key, strconv.Itoa(fallback)))
+	if err != nil || n < 0 {
+		log.Fatalf("invalid %s: want a whole number of seconds", key)
+	}
+	return time.Duration(n) * time.Second
 }
 
 // flagGiven reports whether a flag was set on the command line.
