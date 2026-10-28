@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.140.0] - 2026-10-28
+
 ### Added
 
 - Request ids from MCP through gRPC to the trace record and back (`x-request-id`,
@@ -28,6 +30,25 @@ All notable changes to this project will be documented in this file.
 - An opt-in recall log (`CORTEXDB_RECALL_LOG=1`) with `recall_log_*` tools,
   feedback that exports as recall-eval golden cases, a `/recalls` page in the
   live view, and graph shading and replay by recall (#104).
+
+### Changed
+
+- The server's log lines are `log/slog` records (logfmt by default): the
+  request log writes `req_id`, `rpc`, `dur_s`, `stages_ms.<stage>` and
+  `slow=true` where it wrote `dur=…s`, `<stage>=…s` and `(slow)`. Every value
+  is quoted when it needs to be, so a caller's tool name cannot write fields of
+  its own. A parser of the old text line needs updating; the JSON-lines trace
+  file keeps its fields and gains `req_id`, `resp_bytes`, `result_bytes`, the
+  client's host and project, and a recall's explain record (#104).
+- A knowledge search whose vector half failed now says it answered by keyword
+  (`effective_mode: lexical`, and `degraded`), as a memory search already did
+  (#104).
+- The Python client's generated code is regenerated from the current protos,
+  so `AdminService.Backup`, `ContractService` and `DecisionService` are
+  callable from Python (#104).
+- `find_nodes` folds each node's name once a call rather than once per name
+  asked about: a batch of eight names takes 156 ms on a 30,000-node store,
+  where it took 798 ms (#110). Lauro Foletti.
 
 ## [2.139.1] - 2026-10-27
 
